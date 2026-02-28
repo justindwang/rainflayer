@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <IsPublishable>False</IsPublishable>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <RootNamespace>Rainflayer</RootNamespace>
+    <AssemblyName>Rainflayer</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>libs\BepInEx.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="BepInEx.Unity.Mono">
+      <HintPath>libs\BepInEx.Unity.Mono.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>libs\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>libs\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>libs\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>libs\UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>libs\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="com.unity.multiplayer-hlapi.Runtime">
+      <HintPath>libs\com.unity.multiplayer-hlapi.Runtime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="RoR2">
+      <HintPath>libs\RoR2.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="KinematicCharacterController">
+      <HintPath>libs\KinematicCharacterController.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- RoR2.CharacterAI is part of RoR2.dll, not a separate assembly -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>libs\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('libs\HGCSharpUtils.dll')">
+    <Reference Include="HGCSharpUtils">
+      <HintPath>libs\HGCSharpUtils.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('libs\LegacyResourcesAPI.dll')">
+    <Reference Include="LegacyResourcesAPI">
+      <HintPath>libs\LegacyResourcesAPI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('libs\MMHOOK_RoR2.dll')">
+    <Reference Include="MMHOOK_RoR2">
+      <HintPath>libs\MMHOOK_RoR2.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
