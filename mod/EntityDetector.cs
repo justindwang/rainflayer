@@ -1,6 +1,9 @@
 using RoR2;
 using RoR2.CharacterAI;
+using RoR2.Navigation;
+using EntityStates;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using System.Linq;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -1255,6 +1258,21 @@ namespace Rainflayer
                 LogError($" Error finding shops: {e.Message}");
             }
 
+            try
+            {
+                // === MOON BATTERIES / PILLARS (moon2 scene only) ===
+                if (SceneManager.GetActiveScene().name == "moon2")
+                {
+                    InteractableInfo[] pillars = FindMoonPillars();
+                    interactables.AddRange(pillars);
+                    if (debug) Log($" Found {pillars.Length} uncharged moon pillars");
+                }
+            }
+            catch (System.Exception e)
+            {
+                LogError($" Error finding moon pillars: {e.Message}");
+            }
+
                 if (debug)
                 {
                     Log($" Total interactables found: {interactables.Count}");
@@ -1587,6 +1605,335 @@ namespace Rainflayer
         }
 
         /// <summary>
+        /// Samples positions along the vector from startPos to targetPos and returns the
+        /// furthest position that the ground NodeGraph A* can reach from startPos.
+        /// Used to build an intermediate NavWaypoint when the final target is on a disconnected
+        /// graph component (e.g. moon2 battery pillars on floating islands).
+        /// Returns null if even the closest sample is unreachable, or if the graph is unavailable.
+        /// </summary>
+        public Vector3? FindFurthestReachableGroundPosition(Vector3 startPos, Vector3 targetPos, int samples = 6)
+        {
+            if (SceneInfo.instance == null) return null;
+            NodeGraph groundGraph = SceneInfo.instance.GetNodeGraph(MapNodeGroup.GraphType.Ground);
+            if (groundGraph == null) return null;
+
+            CharacterBody body = GetBody();
+            HullClassification hull = body?.hullClassification ?? HullClassification.Human;
+
+            NodeGraph.PathRequest req = new NodeGraph.PathRequest();
+            req.startPos = startPos;
+            req.hullClassification = hull;
+            req.maxJumpHeight = float.PositiveInfinity;
+            req.maxSpeed = body?.moveSpeed ?? 7f;
+
+            Vector3? best = null;
+            for (int i = 1; i <= samples; i++)
+            {
+                float t = (float)i / samples;
+                Vector3 candidate = Vector3.Lerp(startPos, targetPos, t);
+
+                req.endPos = candidate;
+                req.path = new Path(groundGraph);
+                PathTask task = groundGraph.ComputePath(req);
+
+                if (task.wasReachable)
+                    best = candidate;
+                else
+                    break;  // Positions further along this line are likely also unreachable
+            }
+            return best;
+        }
+
+        /// <summary>
+        /// Snap a world position to the nearest walkable ground NodeGraph node.
+        /// Use this before setting pillar / jump-pad positions as navigation targets so
+        /// NodeGraph A* can always plan a valid path (targets off or above the graph beeline).
+        /// Falls back to the original position if NodeGraph or SceneInfo is unavailable.
+        /// </summary>
+        public Vector3 SnapToNearestGroundNode(Vector3 worldPos)
+        {
+            try
+            {
+                if (SceneInfo.instance == null) return worldPos;
+                NodeGraph groundGraph = SceneInfo.instance.GetNodeGraph(MapNodeGroup.GraphType.Ground);
+                if (groundGraph == null) return worldPos;
+
+                CharacterBody body = GetBody();
+                HullClassification hull = body?.hullClassification ?? HullClassification.Human;
+
+                NodeGraph.NodeIndex nodeIndex = groundGraph.FindClosestNode(worldPos, hull);
+                Vector3 nodePos;
+                if (groundGraph.GetNodePosition(nodeIndex, out nodePos))
+                    return nodePos;
+            }
+            catch { }
+            return worldPos;
+        }
+
+        /// <summary>
+        /// Find uncharged moon battery pillars on the moon2 (Commencement) map.
+        /// Scans HoldoutZoneControllers whose name contains "Battery" — the four pillars
+        /// (Mass, Soul, Blood, Design). Returns only those not yet fully charged.
+        /// Interaction via OnInteractionBegin triggers charging.
+        /// </summary>
+        public InteractableInfo[] FindMoonPillars()
+        {
+            CharacterBody body = GetBody();
+            if (body == null) return new InteractableInfo[0];
+
+            var results = new List<InteractableInfo>();
+            Vector3 playerPos = body.transform.position;
+
+            // Find the rescue ship — it sits on the main open platform and is always reachable
+            // from the battery islands via the Arena gate. Used as:
+            //   (a) probe anchor (more reliable than spawn pos)
+            //   (b) nav waypoint when bot is still in spawn room and can't reach islands directly
+            Vector3? shipNavWaypoint = null;
+            GameObject rescueShip = GameObject.Find("RescueshipMoon");
+            if (rescueShip != null)
+                shipNavWaypoint = SnapToNearestGroundNode(rescueShip.transform.position);
+
+            // Build a reachability-test request from the player's current position.
+            NodeGraph groundGraph = SceneInfo.instance?.GetNodeGraph(MapNodeGroup.GraphType.Ground);
+            HullClassification hull = body.hullClassification;
+            NodeGraph.PathRequest reachReq = new NodeGraph.PathRequest();
+            reachReq.startPos = playerPos;
+            reachReq.hullClassification = hull;
+            reachReq.maxJumpHeight = float.PositiveInfinity;
+            reachReq.maxSpeed = body.moveSpeed;
+
+            string pillarRequiredGate = null;
+
+            try
+            {
+                HoldoutZoneController[] holdouts = GameObject.FindObjectsOfType<HoldoutZoneController>();
+                foreach (var hz in holdouts)
+                {
+                    if (hz == null) continue;
+
+                    GameObject obj = null;
+                    string name = "";
+                    Vector3 pos = Vector3.zero;
+                    float charge = 0f;
+
+                    try
+                    {
+                        obj = hz.gameObject;
+                        if (obj == null || obj.GetInstanceID() == 0) continue;
+                        name = obj.name;
+                        pos = obj.transform.position;
+                        charge = hz.charge;
+                    }
+                    catch { continue; }
+
+                    // Moon batteries have "Battery" in their name; exclude teleporter
+                    if (!name.ToLower().Contains("battery")) continue;
+                    if (obj.GetComponent<TeleporterInteraction>() != null) continue;
+
+                    // Skip disabled pillars (game bug: >4 Battery HoldoutZoneControllers can exist;
+                    // extras get disabled when the real 4 are cleared, but still appear in FindObjectsOfType)
+                    if (!obj.activeInHierarchy) continue;
+
+                    // Skip fully charged pillars
+                    if (charge >= 1.0f) continue;
+
+                    // Open gate so FindClosestNode can see actual island nodes (not main-platform fallback).
+                    // Gate stays open — NavigationController.ClearFullNavigationState closes it on arrival/abort.
+                    if (pillarRequiredGate != null && SceneInfo.instance != null)
+                        SceneInfo.instance.SetGateState(pillarRequiredGate, true);
+
+                    Vector3 groundSnap = SnapToNearestGroundNode(pos);
+
+                    // Check reachability from player's current position (gate already open above).
+                    bool reachableFromHere = false;
+                    if (groundGraph != null)
+                    {
+                        reachReq.endPos = groundSnap;
+                        reachReq.path = new Path(groundGraph);
+                        PathTask task = groundGraph.ComputePath(reachReq);
+                        reachableFromHere = task.wasReachable;
+                    }
+
+                    Vector3? navWaypoint = reachableFromHere ? null : shipNavWaypoint;
+                    float dist = Vector3.Distance(playerPos, pos);
+
+                    // Look up the hardcoded waypoint chain for this pillar type.
+                    // WaypointChain takes priority over NavWaypoint in NavigationController.
+                    string nameLower = name.ToLower();
+                    string pillarType = nameLower.Contains("blood") ? "blood"
+                                      : nameLower.Contains("soul")  ? "soul"
+                                      : nameLower.Contains("mass")  ? "mass"
+                                      : nameLower.Contains("design") ? "design"
+                                      : null;
+                    Vector3[] chain = null;
+                    if (pillarType != null)
+                        NavigationController.Moon2PillarChains.TryGetValue(pillarType, out chain);
+                    // Only use chain if it's non-empty (TODO entries fall back to NavWaypoint)
+                    if (chain != null && chain.Length == 0) chain = null;
+
+                    // Build return chain: design uses custom recorded waypoints (forward path is
+                    // all downward jumps — can't reverse).  All other pillar types use the
+                    // forward chain reversed (same ledges/jumps work in both directions).
+                    Vector3[] returnChain = null;
+                    if (pillarType != null)
+                    {
+                        if (NavigationController.Moon2PillarReturnChains.TryGetValue(pillarType, out var custom))
+                            returnChain = custom;
+                        else if (chain != null)
+                        {
+                            returnChain = (Vector3[])chain.Clone();
+                            System.Array.Reverse(returnChain);
+                        }
+                    }
+
+                    RainflayerPlugin.Instance?.Log($"[PILLAR] Found '{name}' type={pillarType ?? "unknown"}  GroundSnap={groundSnap:F1}  Chain={chain?.Length.ToString() ?? "none"} waypoints  ReturnChain={returnChain?.Length.ToString() ?? "none"}  ReachableNow={reachableFromHere}  Charge={charge * 100f:F0}%");
+
+                    results.Add(new InteractableInfo
+                    {
+                        GameObject = obj,
+                        Type = "pillar",
+                        Name = name,
+                        Position = groundSnap,
+                        RequiredGate = pillarRequiredGate,
+                        NavWaypoint = chain != null ? null : navWaypoint,  // chain supersedes NavWaypoint
+                        WaypointChain = chain,
+                        ReturnChain = returnChain,
+                        Distance = dist,
+                        ChargePercent = charge * 100f,
+                        Charged = false
+                    });
+                }
+            }
+            catch (System.Exception e)
+            {
+                LogError($"Error finding moon pillars: {e.Message}");
+            }
+
+            return results.ToArray();
+        }
+
+        /// <summary>
+        /// Find the nearest active JumpVolume on the current map.
+        /// On moon2 (Commencement) this is the launch pad that sends the player
+        /// to the Mythrix arena after all four batteries are charged.
+        /// Walking onto the trigger fires the launch — no button press needed.
+        /// </summary>
+        public GameObject FindMoonJumpPad()
+        {
+            CharacterBody body = GetBody();
+            if (body == null) return null;
+
+            Vector3 playerPos = body.transform.position;
+            GameObject nearest = null;
+            float nearestDist = float.MaxValue;
+
+            try
+            {
+                JumpVolume[] jumpVolumes = GameObject.FindObjectsOfType<JumpVolume>();
+                foreach (var jv in jumpVolumes)
+                {
+                    if (jv == null) continue;
+
+                    GameObject obj = null;
+                    Vector3 pos = Vector3.zero;
+
+                    try
+                    {
+                        obj = jv.gameObject;
+                        if (obj == null || obj.GetInstanceID() == 0) continue;
+                        if (!obj.activeInHierarchy) continue; // only active pads
+                        pos = obj.transform.position;
+                    }
+                    catch { continue; }
+
+                    float dist = Vector3.Distance(playerPos, pos);
+                    if (dist < nearestDist)
+                    {
+                        nearestDist = dist;
+                        nearest = obj;
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                LogError($"Error finding jump pad: {e.Message}");
+            }
+
+            if (nearest != null)
+                Log($"Found jump pad '{nearest.name}' at {nearestDist:F1}m");
+
+            return nearest;
+        }
+
+        /// <summary>
+        /// Find a LunarTeleporter orb in the scene.
+        /// These spawn in the Mythrix arena after the fight ends and teleport players back to the moon.
+        /// Detected via EntityStateMachine whose current state is in the EntityStates.LunarTeleporter namespace.
+        /// Returns the nearest active orb, or null if none found.
+        /// </summary>
+        public GameObject FindLunarTeleporterOrb()
+        {
+            CharacterBody body = GetBody();
+            if (body == null) return null;
+
+            Vector3 playerPos = body.transform.position;
+            GameObject nearest = null;
+            float nearestDist = float.MaxValue;
+
+            try
+            {
+                // Use GenericInteraction component scan — same pattern as PurchaseInteraction for chests.
+                // The LunarTeleporter orb has a GenericInteraction on it (confirmed from RoR2 source:
+                // LunarTeleporterBaseState.OnEnter calls GetComponent<GenericInteraction>()).
+                // Filter by object name containing "lunar" (case-insensitive).
+                GenericInteraction[] all = GameObject.FindObjectsOfType<GenericInteraction>();
+                Log($"FindLunarTeleporterOrb: found {all?.Length ?? 0} GenericInteraction objects");
+
+                foreach (var gi in all)
+                {
+                    if (gi == null) continue;
+
+                    GameObject obj = null;
+                    try
+                    {
+                        obj = gi.gameObject;
+                        if (obj == null || !obj.activeInHierarchy) continue;
+                    }
+                    catch { continue; }
+
+                    string name = obj.name ?? "";
+                    Log($"  GenericInteraction: '{name}' at {obj.transform.position}");
+
+                    // The LunarTeleporter orb is named "MoonElevator" in-scene
+                    if (name.IndexOf("MoonElevator", System.StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+
+                    Vector3 pos;
+                    try { pos = obj.transform.position; }
+                    catch { continue; }
+
+                    float dist = Vector3.Distance(playerPos, pos);
+                    if (dist < nearestDist)
+                    {
+                        nearestDist = dist;
+                        nearest = obj;
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                LogError($"Error finding LunarTeleporter orb: {e.Message}");
+            }
+
+            if (nearest != null)
+                Log($"Found LunarTeleporter orb '{nearest.name}' at {nearestDist:F1}m");
+            else
+                Log($"FindLunarTeleporterOrb: no matching GenericInteraction found");
+
+            return nearest;
+        }
+
+        /// <summary>
         /// Phase 2.5: Find nearest dropped item pickup.
         /// Uses GenericPickupController (RoR2 API) to detect items on the ground.
         /// Similar to AutoPlay's FindItemPickup() implementation.
@@ -1697,6 +2044,30 @@ namespace Rainflayer
         public float ChargePercent { get; set; } = 0f;  // For teleporter
         public bool BossActive { get; set; } = false;  // For teleporter
         public bool IsLocked { get; set; } = false;  // True when locked (e.g., during teleporter event)
+        // Two-phase navigation: intermediate waypoint on the ground graph that the bot reaches
+        // before attempting the final approach to Position (used when Position is on a
+        // disconnected graph component, e.g. moon2 battery pillars on floating islands).
+        public Vector3? NavWaypoint { get; set; } = null;
+        // Multi-hop waypoint chain for crossing disconnected subgraphs (e.g. moon2 pillar islands).
+        // When set, NavigationController consumes these in order before approaching Position.
+        // Each hop tries A* first; falls back to direct movement when unreachable.
+        // Takes priority over NavWaypoint when both are set.
+        public Vector3[] WaypointChain { get; set; } = null;
+        // How to get back from this pillar zone to the main platform.
+        // Blood/soul/mass = WaypointChain reversed at runtime.  Design = custom recorded path.
+        // Prepended to the next pillar's forward chain when IsInPillarZone is true.
+        public Vector3[] ReturnChain { get; set; } = null;
+        // NodeGraph gate that must be opened during A* computation to reach this target.
+        // The gate is opened just before ComputePath and closed immediately after — no lasting side effect.
+        public string RequiredGate { get; set; } = null;
+        // Skip-ahead cap: CheckChainSkipAhead will not advance waypointChainIndex past this index.
+        // Use to protect waypoints that appear reachable but physically are not (false positive).
+        // null = no cap (default behaviour).
+        public int? WaypointChainSkipCap { get; set; } = null;
+        // Chain indices where A* should be bypassed and beeline used instead.
+        // When waypointChainIndex is one of these values, RecomputePath is skipped so the
+        // bot moves direct (beeline) to that waypoint regardless of graph reachability.
+        public System.Collections.Generic.HashSet<int> WaypointChainBeelineIndices { get; set; } = null;
     }
 
     /// <summary>

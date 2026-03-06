@@ -269,10 +269,16 @@ class RoR2BrainController:
             logger.info(f"[{ts()}] [Brain] ({source}) {reasoning}")
 
         # Add synchronous commands to ledger immediately; FIND_AND_INTERACT
-        # gets added when C# fires action_started (confirms target found)
+        # gets added when C# fires action_started (confirms target found).
+        # GOTO:CANCEL and mode/strategy bookkeeping are excluded — no completion event expected.
+        _SKIP_LEDGER = {"FIND_AND_INTERACT", "STRATEGY", "MODE"}
         for cmd_str in commands:
-            if not cmd_str.startswith("FIND_AND_INTERACT"):
-                self._add_to_ledger(cmd_str, "pending")
+            prefix = cmd_str.split(":", 1)[0].upper()
+            if prefix in _SKIP_LEDGER:
+                continue
+            if cmd_str.upper() == "GOTO:CANCEL":
+                continue
+            self._add_to_ledger(cmd_str, "pending")
 
         for cmd_str in commands:
             parts = cmd_str.split(':', 1)
@@ -296,8 +302,22 @@ class RoR2BrainController:
             elif cmd == "FIND_AND_INTERACT":
                 self.bridge.send_command("FIND_AND_INTERACT", args_lower)
 
-            elif cmd == "GOTO" and args_lower == "cancel":
-                self.bridge.goto_cancel()
+            elif cmd == "GOTO":
+                if args_lower == "cancel":
+                    self.bridge.goto_cancel()
+                    # Mark any pending GOTO entries as cancelled
+                    for action in self.action_ledger:
+                        if action["status"] == "pending" and action["command"].upper().startswith("GOTO:"):
+                            action["status"] = "failed"
+                            action["reason"] = "cancelled"
+                    # CANCEL is synchronous — no action_complete ever arrives from C#.
+                    # Clear the directive immediately so the brain doesn't re-issue the GOTO.
+                    if self._is_directive_valid() and self.directive_type == "tactical":
+                        logger.info(f"[{ts()}] [Brain] Directive cleared by GOTO:CANCEL")
+                        self.user_directive = None
+                        self.directive_timestamp = None
+                else:
+                    self.bridge.send_command("GOTO", args)
 
             elif cmd == "BUY_SHOP_ITEM":
                 self.bridge.send_command("BUY_SHOP_ITEM", args)
@@ -373,9 +393,9 @@ class RoR2BrainController:
         elif event_name == "combat_entered":
             for action in self.action_ledger:
                 if action["status"] == "pending" and action["command"].startswith("FIND_AND_INTERACT"):
-                    # Teleporter navigation is a stage objective - it persists through combat.
-                    # Only interrupt loot-type actions (chests, shrines, shops).
-                    if "teleporter" in action["command"].lower():
+                    # These are long-running objectives that persist through combat — never interrupt.
+                    cmd_lower = action["command"].lower()
+                    if any(kw in cmd_lower for kw in ("teleporter", "pillar", "jump_pad", "ship")):
                         continue
                     action["status"] = "interrupted"
                     action["reason"] = "combat"
@@ -390,6 +410,12 @@ class RoR2BrainController:
         disappeared = self.last_seen_interactables - current_ids
 
         for inter_type, inter_name in disappeared:
+            # Pillars get action_complete directly from C# (charge >= 1.0 triggers the event).
+            # Disappearance-based detection is unreliable for pillars because FindMoonPillars()
+            # only returns uncharged pillars — any query fluctuation causes a false success,
+            # which makes the brain re-issue FIND_AND_INTERACT:pillar while still navigating.
+            if inter_type == "pillar":
+                continue
             for action in self.action_ledger:
                 if action["status"] in ("pending", "interrupted") and \
                         action["command"].startswith(f"FIND_AND_INTERACT:{inter_type}"):
@@ -434,7 +460,9 @@ class RoR2BrainController:
 
     def _classify_directive(self, directive: str) -> str:
         tactical_keywords = ["go to", "find", "use", "open", "interact", "buy",
-                             "teleporter", "chest", "shrine", "navigate", "get"]
+                             "teleporter", "chest", "shrine", "navigate", "get",
+                             "goto", "island", "mass", "soul", "blood", "design",
+                             "pillar", "main", "cancel", "ship", "escape", "orb"]
         directive_lower = directive.lower()
         return "tactical" if any(kw in directive_lower for kw in tactical_keywords) else "strategic"
 
@@ -451,6 +479,16 @@ class RoR2BrainController:
         for kw in ["teleporter", "chest", "shrine", "shop"]:
             if kw in directive_lower and kw in command_lower:
                 return True
+        # GOTO island commands: match when command is a GOTO: entry whose name appears
+        # in the directive (e.g. directive "go to mass" matches "GOTO:mass-main").
+        # Also match any GOTO directive against any GOTO command (covers GOTO:CANCEL etc.)
+        if command_lower.startswith("goto:"):
+            if "goto" in directive_lower or "cancel" in directive_lower:
+                return True
+            # Check island names
+            for island in ["mass", "soul", "blood", "design"]:
+                if island in directive_lower and island in command_lower:
+                    return True
         return False
 
     def _try_auto_clear_directive(self):

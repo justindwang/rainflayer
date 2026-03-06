@@ -124,6 +124,29 @@ Python's `bridge.query_interactables()` automatically deduplicates to the closes
 
 ---
 
+### QUERY_PILLARS
+
+Moon2 / Commencement only. Returns the charge status of all four moon battery pillars.
+
+```json
+{"type": "QUERY_PILLARS"}
+```
+
+Response:
+```json
+{
+  "type": "PILLARS",
+  "pillars": [
+    {"name": "blood",  "charged": true},
+    {"name": "soul",   "charged": false},
+    {"name": "mass",   "charged": false},
+    {"name": "design", "charged": true}
+  ]
+}
+```
+
+---
+
 ### QUERY_ALLIES
 
 ```json
@@ -160,10 +183,22 @@ Response:
 | `FIND_AND_INTERACT` | `chest` | Navigate to nearest chest and open it |
 | `FIND_AND_INTERACT` | `shrine` | Navigate to nearest shrine and use it |
 | `FIND_AND_INTERACT` | `teleporter` | Navigate to teleporter and activate it |
-| `GOTO` | `CANCEL` | Cancel current navigation |
+| `FIND_AND_INTERACT` | `pillar` | Navigate to nearest uncharged moon battery pillar and interact (moon2 only) |
+| `FIND_AND_INTERACT` | `jump_pad` | Navigate to the jump pad leading to the Mythrix arena (moon2 only) |
+| `FIND_AND_INTERACT` | `ship` | Navigate to the rescue ship to escape the moon after defeating Mythrix (moon2 only) |
+| `GOTO` | `CANCEL` | Cancel current navigation AND clear all island/return-path tracking (full reset) |
+| `GOTO` | `<island>` | Travel from main platform to named island — moon2 state reset only (e.g. `mass`) |
+| `GOTO` | `<from>-main` | Return from named island back to main platform — moon2 state reset only (e.g. `mass-main`) |
+| `GOTO` | `<from>-<dest>` | Return from one island and travel to another — moon2 state reset only (e.g. `mass-blood`) |
 | `BUY_SHOP_ITEM` | `Item Name` | Navigate to nearest shop and buy named item |
 
+Moon2 islands: `blood`, `soul`, `mass`, `design`
+
 `FIND_AND_INTERACT` handles the full navigation → combat → interaction loop internally. If combat interrupts it (enemy within 10m), the mod pauses and resumes after the threat is cleared.
+
+`FIND_AND_INTERACT:pillar`, `FIND_AND_INTERACT:jump_pad`, and `FIND_AND_INTERACT:ship` are long-running journeys (60–120s). Issue once and wait — do not cancel or retry unless explicitly directed.
+
+`GOTO:<island>` variants are **not** general navigation commands. They exist only to help recover from bugged moon2 island state (e.g. player is stuck on an island with broken geometry). Use `FIND_AND_INTERACT:pillar` for normal pillar charging.
 
 ### Combat strategy
 
@@ -194,7 +229,17 @@ The mod can push events to Python over the same TCP connection without being que
 {"type": "EVENT", "event_type": "action_complete", "command": "FIND_AND_INTERACT:chest", "result": "interrupted"}
 {"type": "EVENT", "event_type": "action_complete", "command": "FIND_AND_INTERACT:chest", "result": "failed (stuck)"}
 {"type": "EVENT", "event_type": "action_complete", "command": "FIND_AND_INTERACT:chest", "result": "failed (no gold)"}
+{"type": "EVENT", "event_type": "action_complete", "command": "FIND_AND_INTERACT:pillar", "result": "failed (in_mythrix_arena)"}
 ```
+
+`result` values:
+- `success` — action completed
+- `pending` — sent, awaiting completion
+- `interrupted` — paused by nearby combat (within 10m); mod resumes automatically
+- `failed (stuck)` — could not reach destination (pathing blocked)
+- `failed (cancelled)` — action was cancelled
+- `failed (no gold)` — insufficient gold to open chest
+- `failed (in_mythrix_arena)` — pillar/jump_pad command issued but player is already inside the Mythrix arena; switch to `MODE:combat` instead of retrying
 
 The brain tracks these outcomes as action history and feeds them back to the LLM so it can retry or adapt.
 

@@ -88,5 +88,18 @@ namespace Rainflayer
                 socketBridge.HandleQueryCombatStatus();
             }
         }
+
+        /// <summary>
+        /// Handle QUERY_PILLARS command.
+        /// Returns charge status of all moon battery pillars on moon2 (Commencement).
+        /// </summary>
+        public void HandleQueryPillars()
+        {
+            var socketBridge = controller.GetComponent<SocketBridge>();
+            if (socketBridge != null)
+            {
+                socketBridge.HandleQueryPillars();
+            }
+        }
     }
 }

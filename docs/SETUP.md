@@ -18,7 +18,7 @@ Full setup instructions for Rainflayer.
 **Via mod manager (recommended):**
 1. Install [r2modman](https://thunderstore.io/package/ebkr/r2modman/)
 2. Select Risk of Rain 2 and create a profile
-3. Search for Rainflayer and install it (BepInEx installs automatically as a dependency)
+3. Search for Rainflayer and install it (BepInEx installs automatically as a dependency) (Note: I still need to do this)
 4. Launch RoR2 through r2modman once to generate the config, then close it
 
 **Manually:**

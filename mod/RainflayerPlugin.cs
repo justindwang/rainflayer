@@ -25,6 +25,7 @@ namespace Rainflayer
         // Configuration
         public static ConfigEntry<bool> EnableAIControl { get; private set; }
         public static ConfigEntry<bool> DebugMode { get; private set; }
+        public static ConfigEntry<bool> RecordWaypoints { get; private set; }
 
         // Components
         public AIController aiController;  // Made public for SocketBridge access
@@ -71,6 +72,13 @@ namespace Rainflayer
                 "DebugMode",
                 true,
                 "Enable debug logging."
+            );
+
+            RecordWaypoints = Config.Bind(
+                "Debug",
+                "RecordWaypoints",
+                false,
+                "When true, log player position + NodeGraph reachability every ~2.5s. Walk from ship to each pillar island. Look for [WP] lines in BepInEx/LogOutput.log — the last reachable=True before it flips False marks the subgraph boundary. Copy those coords into NavigationController.Moon2PillarChains."
             );
         }
 
@@ -552,6 +560,14 @@ namespace Rainflayer
 
         void FixedUpdate()
         {
+            // Waypoint recorder runs regardless of AI control (enable RecordWaypoints=true and walk manually)
+            if (RecordWaypoints.Value && aiController != null)
+            {
+                CharacterBody body = GetPlayerBody();
+                if (body != null)
+                    aiController.TickWaypointRecorder(body);
+            }
+
             // Fixed update for AI operations
             if (aiController != null && PlayerAI != null && EnableAIControl.Value)
             {

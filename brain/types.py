@@ -110,6 +110,7 @@ class ObjectiveData:
     teleporter_charged: bool
     teleporter_charge: float
     boss_active: bool
+    scene_name: str = "unknown"
 
     @classmethod
     def from_dict(cls, data: dict) -> 'ObjectiveData':
@@ -117,7 +118,8 @@ class ObjectiveData:
             objective=data.get('objective', 'exploring'),
             teleporter_charged=data.get('teleporter_charged', False),
             teleporter_charge=data.get('teleporter_charge', 0.0),
-            boss_active=data.get('boss_active', False)
+            boss_active=data.get('boss_active', False),
+            scene_name=data.get('scene_name', 'unknown')
         )
 
 

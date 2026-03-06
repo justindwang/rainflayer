@@ -31,24 +31,25 @@ namespace Rainflayer
         private bool characterDetected = false; // true once body name has been resolved
 
         // Aim-confirm pulse state -----------------------------------------------
-        // After activating a 2-stage skill, EntityStates read InputBank directly
-        // (e.g. PlaceTurret checks skill4.justPressed, BaseArrowBarrage checks
-        // skill1.justPressed || skill4.justPressed).  We pulse the *same* button that
-        // activated the skill each FixedUpdate so the EntityState receives the justPressed
-        // events it waits for — matching the approach used by PlayerBots / AutoPlay.
+        // After activating a 2-stage skill, EntityStates read InputBank directly.
+        // We pulse the *same* button that activated the skill each FixedUpdate so
+        // the EntityState receives the justPressed events it needs.
+        //
+        // Exception: Engineer secondary (slot 2, harpoon painter) requires skill1
+        // (primary held) to confirm placement — handled via aimConfirmButtonIndex.
         private bool aimConfirmActive = false;
         private float aimConfirmTimer = 0f;
         private bool aimConfirmPulse = false;   // toggled each frame for justPressed events
-        private int aimConfirmSkillIndex = 4;   // 1=skill1(primary), 2, 3, 4
+        private int aimConfirmButtonIndex = 4;  // which InputBank button to pulse (usually same as trigger slot)
         private const float AIM_CONFIRM_DEFAULT_DURATION = 2.5f;
 
         // Which slot indices (1-4) require an aim-confirm pulse after activation,
         // keyed by survivor type.  The pulse uses the *same* slot button that was
-        // pressed, which is what the relevant EntityStates check.
-        //   Huntress special  (4): BaseArrowBarrage checks skill1.justPressed || skill4.justPressed
-        //   Engineer secondary(2): missile painter needs confirm on skill2
-        //   Engineer special  (4): PlaceTurret checks skill1.down || skill4.justPressed
-        //   Captain utility   (3): SetupAirstrike / SetupSupplyDrop check skill3
+        // pressed EXCEPT for Engineer slot 2 (harpoons) which needs skill1.
+        //   Huntress special  (4): confirm with skill4
+        //   Engineer secondary(2): confirm with skill1 (harpoon painter special case)
+        //   Engineer special  (4): confirm with skill4
+        //   Captain utility   (3): confirm with skill3
         private static readonly System.Collections.Generic.Dictionary<SurvivorType, System.Collections.Generic.HashSet<int>>
             AimConfirmSlots = new System.Collections.Generic.Dictionary<SurvivorType, System.Collections.Generic.HashSet<int>>
         {
@@ -190,6 +191,7 @@ namespace Rainflayer
             aimConfirmActive = false;
             aimConfirmTimer = 0f;
             aimConfirmPulse = false;
+            aimConfirmButtonIndex = 4;
 
             // Force re-detection on next update (body changes between runs)
             characterDetected = false;
@@ -545,8 +547,10 @@ namespace Rainflayer
 
         /// <summary>
         /// Execute a skill if in range and ready.  If the current survivor has this
-        /// slot listed in AimConfirmSlots, immediately start pulsing that same button
-        /// so 2-stage EntityStates receive the justPressed events they need.
+        /// slot listed in AimConfirmSlots, start pulsing the confirm button so
+        /// 2-stage EntityStates receive the justPressed events they need.
+        /// The confirm button is the same slot that was pressed, EXCEPT for Engineer
+        /// slot 2 (harpoon painter) which requires skill1 (primary) to confirm.
         /// </summary>
         private void UseSkillIfReady(CharacterBody body, GenericSkill skill, int slotIndex,
                                      float distanceToTarget, float maxRange)
@@ -557,26 +561,31 @@ namespace Rainflayer
 
             // Trigger aim-confirm for slots that need it on this survivor
             if (AimConfirmSlots.TryGetValue(currentSurvivor, out var slots) && slots.Contains(slotIndex))
-                TriggerAimConfirm(slotIndex);
+            {
+                // Engineer harpoon painter (slot 2) confirms with skill1 (primary held)
+                // All other 2-stage skills confirm by re-pressing the same slot
+                int confirmButton = (currentSurvivor == SurvivorType.Engineer && slotIndex == 2) ? 1 : slotIndex;
+                TriggerAimConfirm(confirmButton);
+            }
         }
 
         /// <summary>
-        /// Start pulsing InputBank button <paramref name="skillIndex"/> for up to
+        /// Start pulsing InputBank button <paramref name="buttonIndex"/> for up to
         /// <paramref name="duration"/> seconds.  Alternating true/false generates a
         /// fresh justPressed event every cycle — matching TapContinuous behaviour.
         /// </summary>
-        private void TriggerAimConfirm(int skillIndex, float duration = AIM_CONFIRM_DEFAULT_DURATION)
+        private void TriggerAimConfirm(int buttonIndex, float duration = AIM_CONFIRM_DEFAULT_DURATION)
         {
             aimConfirmActive = true;
             aimConfirmTimer = duration;
-            aimConfirmSkillIndex = skillIndex;
+            aimConfirmButtonIndex = buttonIndex;
             aimConfirmPulse = false; // flips to true on first pulse frame
         }
 
         private void PushAimConfirmButton(CharacterBody body, bool state)
         {
             if (body.inputBank == null) return;
-            switch (aimConfirmSkillIndex)
+            switch (aimConfirmButtonIndex)
             {
                 case 1: body.inputBank.skill1.PushState(state); break;
                 case 2: body.inputBank.skill2.PushState(state); break;

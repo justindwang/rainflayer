@@ -28,6 +28,16 @@ namespace Rainflayer
         public NavigationController GetNavigationController() => navigationController;
         public CombatController GetCombatController() => combatController;
 
+        /// <summary>
+        /// Returns true when the player is in the Mythrix arena (Y >= 400).
+        /// Used to suppress pillar/jump_pad commands that are only relevant on the moon surface.
+        /// More reliable than WasLaunchedByJumpPad which could false-positive on fall/respawn teleports.
+        /// </summary>
+        private static bool IsInMythrixArena(CharacterBody body)
+        {
+            return body != null && body.transform.position.y >= 400f;
+        }
+
         private static bool IsGameObjectValid(GameObject obj)
         {
             // Unity objects can appear "not null" even when destroyed
@@ -60,6 +70,13 @@ namespace Rainflayer
 
         private bool waitingForPickup = false;  // Waiting for items to spawn and be picked up after chest opens
         private const float PICKUP_RANGE = 1.0f;  // Need to be within 1m for magnetic pickup to work
+
+        // Jump pad dwell: after arriving at the teleporter waypoint, hold position for
+        // JUMP_PAD_DWELL_DURATION seconds before sending action_complete:success.
+        // The Arena gate is already open at this point (all pillars charged = game opens it).
+        // The dwell lets the teleporter trigger volume actually launch the bot.
+        private float jumpPadDwellTimer = -1f;  // -1 = inactive; counts down when active
+        private const float JUMP_PAD_DWELL_DURATION = 4f;
 
         // Follow mode
         private const float FOLLOW_STOP_DISTANCE = 5f;  // Stop following when within 5m of ally
@@ -96,8 +113,14 @@ namespace Rainflayer
             if (navigationController != null)
             {
                 navigationController.ResetDropPodState();
+                navigationController.ResetWaypointRecorder();
                 Log("[Drop Pod] State reset for new stage");
             }
+        }
+
+        public void TickWaypointRecorder(CharacterBody body)
+        {
+            navigationController?.TickWaypointRecorder(body);
         }
 
         /// <summary>
@@ -133,8 +156,10 @@ namespace Rainflayer
                 navigationController.isNavigating = false;
                 navigationController.gotoTarget = null;
                 navigationController.gotoInteractable = null;
-                navigationController.ClearInteractionTarget();
-                Log("[RESET] ✓ Navigation state reset");
+                navigationController.ClearInteractionTarget(clearZoneReturn: true);
+                navigationController.ClearIslandTracking();  // currentIsland + zoneReturnChain (full)
+                navigationController.ResetRunFlags();  // WasLaunchedByLunarTeleporter
+                Log("[RESET] ✓ Navigation state reset (including island tracking + run flags)");
             }
 
             // Reset combat state
@@ -208,6 +233,10 @@ namespace Rainflayer
                         queryHandlers?.HandleQueryCombatStatus();
                         return; // Don't send duplicate response
 
+                    case "QUERY_PILLARS":
+                        queryHandlers?.HandleQueryPillars();
+                        return; // Don't send duplicate response
+
                     // New GOTO commands
                     case "GOTO":
                         HandleGotoCommand(args);
@@ -254,13 +283,52 @@ namespace Rainflayer
 
         void HandleGotoCommand(string args)
         {
-            if (string.IsNullOrWhiteSpace(args) || args == "CANCEL")
+            if (string.IsNullOrWhiteSpace(args) || args.ToUpper() == "CANCEL")
             {
-                navigationController.isNavigating = false;
-                navigationController.gotoTarget = null;
-                navigationController.gotoInteractable = null;
-                Log("[GOTO] Cancelled navigation");
+                // Full state reset — clears path follower, waypoint index, gates, smoothing,
+                // stuck timers, interaction target, etc.  Previous code only cleared 3 fields
+                // leaving stale path/smoothing/waypoint state that corrupted the next command.
+                navigationController.CancelNavigation("GOTO:cancel");
+                navigationController.ClearIslandTracking();
+                // Force wait mode so the bot actually stops moving after cancel.
+                currentMode = "wait";
+                isFollowing = false;
+                Log("[GOTO] Cancelled navigation — entering wait mode");
+                return;
             }
+
+            // Moon2 island navigation:
+            //   GOTO:blood-main     → return from blood island to main platform
+            //   GOTO:mass-design    → return from mass to main, then go to design
+            //   GOTO:design         → go to design from main platform (no return needed)
+            // First segment = "from" island (where we currently are).
+            // Optional second segment after '-' = destination island ("main" = stop at platform).
+            string lower = args.ToLower().Trim();
+            int dashIdx = lower.IndexOf('-');
+            string fromIsland = dashIdx >= 0 ? lower.Substring(0, dashIdx) : lower;
+            string toIsland   = dashIdx >= 0 ? lower.Substring(dashIdx + 1) : null;
+
+            if (toIsland == "main") toIsland = null;
+
+            bool fromValid = string.IsNullOrEmpty(fromIsland)
+                || NavigationController.Moon2PillarChains.ContainsKey(fromIsland);
+            bool toValid = string.IsNullOrEmpty(toIsland)
+                || NavigationController.Moon2PillarChains.ContainsKey(toIsland);
+
+            if (!fromValid || !toValid)
+            {
+                Log($"[GOTO] Unknown island name(s): from='{fromIsland}' to='{toIsland}' — valid: blood, soul, mass, design");
+                return;
+            }
+
+            // Fall back to tracked island if no "from" was specified
+            if (string.IsNullOrEmpty(fromIsland))
+                fromIsland = navigationController.currentIsland;
+
+            Log($"[GOTO] Island navigation: from='{fromIsland ?? "main"}' to='{toIsland ?? "main"}'");
+
+            if (!navigationController.StartIslandNavigation(fromIsland, toIsland))
+                Log($"[GOTO] Failed to start island navigation");
         }
 
         void HandleModeCommand(string args)
@@ -357,6 +425,43 @@ namespace Rainflayer
             // Parse args (e.g., "nearest_chest" or just "chest")
             string targetType = args.ToLower().Trim();
 
+            // Ignore consecutive pillar/jump_pad commands while already chain-navigating to one
+            // OR while currently holding the interaction (gotoInteractable is nulled at arrival
+            // but interactionTarget is still set during the charge hold).
+            // The brain re-issues these every ~4s, but each new gotoInteractable assignment
+            // resets waypointChainIndex back to the nearest waypoint, discarding chain progress.
+            // We keep the current navigation running until it ends naturally or a different
+            // command type arrives.
+            if (targetType == "pillar" || targetType == "jump_pad" || targetType == "ship")
+            {
+                bool alreadyNavigating = navigationController.gotoInteractable?.Type == targetType
+                                         && navigationController.isNavigating;
+                bool alreadyInteracting = navigationController.GetInteractionTarget() != null
+                                          && navigationController.lastInteractionCommand == $"FIND_AND_INTERACT:{targetType}";
+                if (alreadyNavigating || alreadyInteracting)
+                {
+                    Log($"[FIND_AND_INTERACT] Already {(alreadyInteracting ? "interacting with" : "navigating to")} {targetType} — ignoring redundant command");
+                    return;
+                }
+            }
+
+            // For jump_pad: also skip if we're already very close to the final destination
+            // (navigation may have just finished, but brain fires another command before launch).
+            if (targetType == "jump_pad")
+            {
+                Vector3[] jpChainCheck = NavigationController.Moon2JumpPadChain;
+                if (jpChainCheck.Length > 0)
+                {
+                    Vector3 jpFinalPos = jpChainCheck[jpChainCheck.Length - 1];
+                    float distToJumpPad = Vector3.Distance(body.transform.position, jpFinalPos);
+                    if (distToJumpPad < 10f)
+                    {
+                        Log($"[FIND_AND_INTERACT] Already at jump pad ({distToJumpPad:F1}m) — ignoring redundant command");
+                        return;
+                    }
+                }
+            }
+
             // Find nearest chest (or whatever target type)
             // Range: 100m (search wider), FOV: 360° (all directions), LOS: true (improved multi-height check)
             // DEBUG: Enable logging to see what's being found
@@ -450,6 +555,141 @@ namespace Rainflayer
             {
                 target = interactables.FirstOrDefault(i => i.Type == "teleporter");
             }
+            else if (targetType == "pillar")
+            {
+                // Pillar commands are only valid on the moon surface (Y < 400). Once in the
+                // Mythrix arena the pillars don't exist and the command makes no sense.
+                if (IsInMythrixArena(body))
+                {
+                    Log($"[FIND_AND_INTERACT] In Mythrix arena (Y={body.transform.position.y:F0}) — pillar command ignored");
+                    socketBridge?.SendEvent("action_failed",
+                        ("command", "FIND_AND_INTERACT:pillar"),
+                        ("reason", "in_mythrix_arena")
+                    );
+                    return;
+                }
+
+                // Find nearest uncharged moon battery pillar (moon2 / Commencement map)
+                InteractableInfo[] pillars = entityDetector.FindMoonPillars();
+                target = pillars.OrderBy(p => p.Distance).FirstOrDefault();
+
+                if (target == null)
+                {
+                    Log($"[FIND_AND_INTERACT] No uncharged pillars found (all charged or not on moon2?)");
+                    socketBridge?.SendEvent("action_failed",
+                        ("command", "FIND_AND_INTERACT:pillar"),
+                        ("reason", "not_found")
+                    );
+                    return;
+                }
+
+                Log($"[FIND_AND_INTERACT] Found pillar '{target.Name}' at {target.Distance:F1}m (charge: {target.ChargePercent:F0}%)");
+
+                // If the bot is inside a pillar zone it must return to the main platform first.
+                // PrependZoneReturnToTarget merges the return chain onto target.WaypointChain
+                // and clears the stored zone chain (it's consumed into the merged navigation).
+                bool wasInPillarZone = navigationController.IsInPillarZone;
+                navigationController.PrependZoneReturnToTarget(target);
+                if (wasInPillarZone)
+                    Log($"[WAYPOINT] zone-return: returning to main platform then navigating to '{target.Name}'");
+                else
+                    Log($"[WAYPOINT] zone-return: navigating to '{target.Name}' from main platform");
+            }
+            else if (targetType == "jump_pad")
+            {
+                // Jump pad is only navigable from the moon surface. If we're already in the
+                // Mythrix arena (Y >= 400) there's nowhere to navigate to.
+                if (IsInMythrixArena(body))
+                {
+                    Log($"[FIND_AND_INTERACT] In Mythrix arena (Y={body.transform.position.y:F0}) — jump_pad command ignored");
+                    socketBridge?.SendEvent("action_failed",
+                        ("command", "FIND_AND_INTERACT:jump_pad"),
+                        ("reason", "in_mythrix_arena")
+                    );
+                    return;
+                }
+
+                // Find the nearest active JumpVolume — the launch pad to the Mythrix arena
+                GameObject jumpPadObj = entityDetector.FindMoonJumpPad();
+                if (jumpPadObj != null)
+                {
+                    // Use the last chain waypoint as the final Position — it's the hardcoded
+                    // teleporter landing spot.  The JumpVolume's snapped node is off the pad.
+                    Vector3[] jpChain = NavigationController.Moon2JumpPadChain;
+                    Vector3 finalPos = jpChain.Length > 0
+                        ? jpChain[jpChain.Length - 1]
+                        : entityDetector.SnapToNearestGroundNode(jumpPadObj.transform.position);
+                    float dist = Vector3.Distance(body.transform.position, finalPos);
+                    target = new InteractableInfo
+                    {
+                        GameObject = jumpPadObj,
+                        Type = "jump_pad",
+                        Name = jumpPadObj.name,
+                        Position = finalPos,
+                        Distance = dist,
+                        WaypointChain = jpChain.Length > 0 ? jpChain : null
+                    };
+                    Log($"[FIND_AND_INTERACT] Found jump pad '{jumpPadObj.name}' at {dist:F1}m (teleporter waypoint pos)");
+
+                    // If currently on a pillar island, prepend the return chain first.
+                    navigationController.PrependZoneReturnToTarget(target);
+                }
+                else
+                {
+                    Log($"[FIND_AND_INTERACT] No jump pad found (all pillars charged yet?)");
+                    socketBridge?.SendEvent("action_failed",
+                        ("command", "FIND_AND_INTERACT:jump_pad"),
+                        ("reason", "not_found")
+                    );
+                    return;
+                }
+            }
+            else if (targetType == "ship")
+            {
+                if (navigationController.WasLaunchedByLunarTeleporter)
+                {
+                    // Phase 2: already out of the arena — navigate via blood return path to the ship.
+                    Vector3[] shipChain = NavigationController.Moon2ShipChain;
+                    Vector3 shipPos = shipChain[shipChain.Length - 1];
+                    float distToShip = Vector3.Distance(body.transform.position, shipPos);
+                    target = new InteractableInfo
+                    {
+                        Type = "ship",
+                        Name = "RescueShip",
+                        Position = shipPos,
+                        Distance = distToShip,
+                        WaypointChain = shipChain,
+                    };
+                    Log($"[FIND_AND_INTERACT] ship Phase 2 — navigating to ship at {shipPos} ({distToShip:F1}m)");
+                }
+                else
+                {
+                    // Phase 1: still in the arena — find and interact with the LunarTeleporter orb.
+                    GameObject orbObj = entityDetector.FindLunarTeleporterOrb();
+                    if (orbObj != null)
+                    {
+                        float dist = Vector3.Distance(body.transform.position, orbObj.transform.position);
+                        target = new InteractableInfo
+                        {
+                            GameObject = orbObj,
+                            Type = "ship",
+                            Name = orbObj.name,
+                            Position = orbObj.transform.position,
+                            Distance = dist,
+                        };
+                        Log($"[FIND_AND_INTERACT] ship Phase 1 — found LunarTeleporter orb '{orbObj.name}' at {dist:F1}m");
+                    }
+                    else
+                    {
+                        Log($"[FIND_AND_INTERACT] ship Phase 1 — no LunarTeleporter orb found yet (boss still alive?)");
+                        socketBridge?.SendEvent("action_failed",
+                            ("command", "FIND_AND_INTERACT:ship"),
+                            ("reason", "orb_not_found")
+                        );
+                        return;
+                    }
+                }
+            }
             else if (targetType == "shop")
             {
                 target = interactables.Where(i => i.Type == "shop").OrderBy(i => i.Distance).FirstOrDefault();
@@ -498,12 +738,18 @@ namespace Rainflayer
                 target = interactables.OrderBy(i => i.Distance).FirstOrDefault();
             }
 
-            if (target != null && target.GameObject != null)
+            // ship Phase 2 has no GameObject (WaypointChain-only navigation) — treat same as snapped-position types.
+            bool isShipPhase2 = target != null && target.Type == "ship" && target.GameObject == null && target.WaypointChain != null;
+            if (target != null && (target.GameObject != null || isShipPhase2))
             {
-                // Set as GOTO target - NodeGraph navigation will take us there, then
-                // FixedUpdateAI calls StartInteraction on arrival (do NOT call it here,
-                // as that would bypass NodeGraph pathfinding by triggering HandleInteractionHolding immediately)
-                navigationController.gotoTarget = target.GameObject;
+                // Pillar and jump_pad positions are NodeGraph-snapped (may differ from the raw
+                // GameObject transform). Navigation MUST use gotoInteractable.Position, not
+                // gotoTarget.transform.position. Setting gotoTarget=null forces HandleGotoNavigation
+                // to use gotoInteractable.Position so A* can plan a valid path.
+                // For all other types (chest, shrine, teleporter, shop) gotoTarget is set
+                // normally because their GameObjects sit at ground-level NodeGraph positions.
+                bool useSnappedPosition = (target.Type == "pillar" || target.Type == "jump_pad" || isShipPhase2);
+                navigationController.gotoTarget = useSnappedPosition ? null : target.GameObject;
                 navigationController.gotoInteractable = target;
                 navigationController.isNavigating = true;
 
@@ -702,6 +948,28 @@ namespace Rainflayer
                     }
                 }
 
+                // === JUMP PAD DWELL ===
+                // After arriving at the teleporter waypoint, hold position for a few seconds
+                // so the launch trigger can fire before we declare success.
+                if (jumpPadDwellTimer >= 0f)
+                {
+                    jumpPadDwellTimer -= Time.fixedDeltaTime;
+                    // Stop moving while dwelling
+                    body.inputBank.moveVector = Vector3.zero;
+                    if (jumpPadDwellTimer <= 0f)
+                    {
+                        jumpPadDwellTimer = -1f;
+                        socketBridge?.SendEvent("action_complete",
+                            ("command", "FIND_AND_INTERACT:jump_pad"),
+                            ("status", "success")
+                        );
+                        navigationController.gotoInteractable = null;
+                        navigationController.gotoTarget = null;
+                        Log("[JUMP_PAD] Dwell complete — success sent, nav cleared");
+                    }
+                    return;  // Don't run combat/nav logic while dwelling
+                }
+
                 // === EVENT TRACKING ===
                 TrackEvents(body);
 
@@ -795,14 +1063,90 @@ namespace Rainflayer
                             // Arrived at non-follow destination (chest, shrine, etc.)
                             if (navigationController.gotoInteractable != null)
                             {
-                                // Store command string so action_complete can match the ledger entry
-                                navigationController.lastInteractionCommand = $"FIND_AND_INTERACT:{navigationController.gotoInteractable.Type}";
-                                navigationController.StartInteraction(navigationController.gotoInteractable.GameObject);
-                                navigationController.gotoInteractable = null;
-                                // Clear nav state so if enemies interrupt via ClearInteractionTarget(),
-                                // isNavigating=true + gotoTarget=chest won't create an infinite arrived-but-nothing loop
-                                navigationController.isNavigating = false;
-                                navigationController.gotoTarget = null;
+                                var interactable = navigationController.gotoInteractable;
+
+                                if (interactable.Type == "island_nav")
+                                {
+                                    // Pure island travel complete — no interaction needed, just notify.
+                                    string gotoCmd = $"GOTO:{interactable.Name}";
+                                    socketBridge?.SendEvent("action_complete",
+                                        ("command", gotoCmd),
+                                        ("status", "success")
+                                    );
+                                    navigationController.isNavigating = false;
+                                    navigationController.gotoTarget = null;
+                                    navigationController.gotoInteractable = null;
+                                    Log($"[GOTO-ISLAND] Arrived at '{interactable.Name}' — action_complete sent");
+                                }
+                                else if (interactable.Type == "jump_pad")
+                                {
+                                    // Jump pad: arrived at teleporter waypoint.
+                                    // Stop navigating and dwell so the teleporter trigger can fire.
+                                    // The Arena gate is already open (game opens it after all pillars charged).
+                                    // action_complete:success is sent after the dwell timer expires.
+                                    if (jumpPadDwellTimer < 0f)
+                                    {
+                                        jumpPadDwellTimer = JUMP_PAD_DWELL_DURATION;
+                                        Log($"[JUMP_PAD] Arrived at teleporter, dwelling {JUMP_PAD_DWELL_DURATION}s for launch");
+                                    }
+                                    // Hold position — don't clear nav state yet (keep bot standing still)
+                                    navigationController.isNavigating = false;
+                                }
+                                else if (interactable.Type == "ship" && interactable.GameObject == null)
+                                {
+                                    // Phase 2 of FIND_AND_INTERACT:ship — arrived at the rescue ship position.
+                                    // No interaction needed; the EscapeSequenceExtractionZone radius handles the win.
+                                    socketBridge?.SendEvent("action_complete",
+                                        ("command", "FIND_AND_INTERACT:ship"),
+                                        ("status", "success")
+                                    );
+                                    navigationController.gotoInteractable = null;
+                                    navigationController.gotoTarget = null;
+                                    navigationController.isNavigating = false;
+                                    Log($"[SHIP] Arrived at rescue ship — escape complete, action_complete sent");
+                                }
+                                else if (interactable.Type == "ship" && interactable.GameObject != null)
+                                {
+                                    // Phase 1 of FIND_AND_INTERACT:ship — arrived near the LunarTeleporter orb.
+                                    // The orb is a walk-into trigger (not press-E), so just clear nav state and
+                                    // keep moving. The teleport detection in HandleGotoNavigation will fire when
+                                    // the orb teleports the player, setting WasLaunchedByLunarTeleporter=true.
+                                    navigationController.gotoInteractable = null;
+                                    navigationController.gotoTarget = null;
+                                    navigationController.isNavigating = false;
+                                    Log($"[SHIP] Arrived near LunarTeleporter orb '{interactable.Name}' — waiting for auto-teleport");
+                                }
+                                else
+                                {
+                                    // Store command string so action_complete can match the ledger entry
+                                    navigationController.lastInteractionCommand = $"FIND_AND_INTERACT:{interactable.Type}";
+                                    navigationController.StartInteraction(interactable.GameObject);
+                                    // Pillar: record which island we're on so PrependZoneReturnToTarget
+                                    // can dynamically build the correct return chain for the next command.
+                                    if (interactable.Type == "pillar")
+                                    {
+                                        string pillarNameLower = interactable.Name.ToLower();
+                                        string islandType = pillarNameLower.Contains("blood")  ? "blood"
+                                                          : pillarNameLower.Contains("soul")   ? "soul"
+                                                          : pillarNameLower.Contains("mass")   ? "mass"
+                                                          : pillarNameLower.Contains("design") ? "design"
+                                                          : null;
+                                        if (islandType != null)
+                                        {
+                                            navigationController.currentIsland = islandType;
+                                            Log($"[WAYPOINT] island tracking set: currentIsland='{islandType}' for '{interactable.Name}'");
+                                        }
+                                        else
+                                        {
+                                            Log($"[WAYPOINT] WARNING: could not determine island type for '{interactable.Name}' — zone return may not work");
+                                        }
+                                    }
+                                    navigationController.gotoInteractable = null;
+                                    // Clear nav state so if enemies interrupt via ClearInteractionTarget(),
+                                    // isNavigating=true + gotoTarget=chest won't create an infinite arrived-but-nothing loop
+                                    navigationController.isNavigating = false;
+                                    navigationController.gotoTarget = null;
+                                }
                             }
                             return;
                         }

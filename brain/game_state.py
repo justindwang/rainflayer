@@ -31,6 +31,7 @@ class RoR2GameState:
     in_combat: bool = False
 
     # Stage context
+    scene_name: str = "unknown"
     teleporter_charged: bool = False
     teleporter_charge: float = 0.0
     boss_active: bool = False
@@ -64,6 +65,7 @@ class RoR2GameState:
         self.current_mode = combat_status.mode
 
     def update_from_objective(self, objective: ObjectiveData):
+        self.scene_name = objective.scene_name
         self.teleporter_charged = objective.teleporter_charged
         self.teleporter_charge = objective.teleporter_charge
         self.boss_active = objective.boss_active
@@ -93,6 +95,7 @@ class RoR2GameState:
     def get_summary(self) -> str:
         """Text summary of game state for LLM input."""
         summary = f"""RoR2 Game State:
+- Current stage: {self.scene_name}
 - Health: {self.health_percent:.0f}% ({self.current_health:.0f}/{self.max_health:.0f})
 - Money: {self.money}
 - Enemies: {self.num_enemies}

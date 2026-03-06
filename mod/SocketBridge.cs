@@ -117,6 +117,7 @@ namespace Rainflayer
             queryHandlers["QUERY_COMBAT_STATUS"] = HandleQueryCombatStatus;
             queryHandlers["QUERY_INTERACTABLES"] = HandleQueryInteractables;
             queryHandlers["QUERY_ALLIES"] = HandleQueryAllies;
+            queryHandlers["QUERY_PILLARS"] = HandleQueryPillars;
 
             // Command handlers (execute via AIController, return status via socket)
             queryHandlers["COMMAND"] = HandleCommand;
@@ -414,10 +415,12 @@ namespace Rainflayer
                 }
 
                 string objective = teleporterCharged ? "teleporter_charged" : (bossActive ? "charging_teleporter" : "exploring");
+                string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
 
                 string json = "{";
                 json += "\"type\": \"OBJECTIVE\",";
                 json += "\"objective\": \"" + objective + "\",";
+                json += "\"scene_name\": \"" + EscapeJson(sceneName) + "\",";
                 json += "\"teleporter_charged\": " + teleporterCharged.ToString().ToLower() + ",";
                 json += "\"teleporter_charge\": " + teleporterCharge.ToString("F1") + ",";
                 json += "\"boss_active\": " + bossActive.ToString().ToLower();
@@ -491,6 +494,60 @@ namespace Rainflayer
             catch (Exception e)
             {
                 SendResponse("{\"type\": \"COMBAT_STATUS\", \"in_combat\": false, \"enemy_count\": 0, \"nearest_enemy_distance\": 999.0, \"error\": \"" + EscapeJson(e.Message) + "\"}");
+            }
+        }
+
+        public void HandleQueryPillars(string queryJson = null)
+        {
+            try
+            {
+                string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                bool isMoon2 = sceneName == "moon2";
+
+                var pillarEntries = new System.Collections.Generic.List<string>();
+                int total = 0, charged = 0;
+
+                HoldoutZoneController[] holdouts = GameObject.FindObjectsOfType<HoldoutZoneController>();
+                foreach (var hz in holdouts)
+                {
+                    if (hz == null) continue;
+                    try
+                    {
+                        GameObject obj = hz.gameObject;
+                        if (obj == null) continue;
+                        string hzName = obj.name;
+                        if (!hzName.ToLower().Contains("battery")) continue;
+                        if (obj.GetComponent<TeleporterInteraction>() != null) continue;
+                        if (!obj.activeInHierarchy) continue;  // skip bugged disabled extras
+
+                        float charge = hz.charge;
+                        bool isCharged = charge >= 1.0f;
+                        total++;
+                        if (isCharged) charged++;
+
+                        pillarEntries.Add("{\"name\": \"" + EscapeJson(hzName) + "\", \"charge\": " + (charge * 100f).ToString("F1") + ", \"charged\": " + isCharged.ToString().ToLower() + "}");
+                    }
+                    catch { }
+                }
+
+                bool allCharged = (total > 0) && (charged == total);
+
+                string json = "{";
+                json += "\"type\": \"PILLARS\",";
+                json += "\"scene\": \"" + EscapeJson(sceneName) + "\",";
+                json += "\"is_moon2\": " + isMoon2.ToString().ToLower() + ",";
+                json += "\"total\": " + total + ",";
+                json += "\"charged\": " + charged + ",";
+                json += "\"all_charged\": " + allCharged.ToString().ToLower() + ",";
+                json += "\"pillars\": [" + string.Join(",", pillarEntries) + "]";
+                json += "}";
+
+                SendResponse(json);
+                DebugLog("[SocketBridge] Sent pillars: " + charged + "/" + total + " charged");
+            }
+            catch (Exception e)
+            {
+                SendResponse("{\"type\": \"PILLARS\", \"error\": \"" + EscapeJson(e.Message) + "\"}");
             }
         }
 
