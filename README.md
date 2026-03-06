@@ -5,7 +5,8 @@
 <p align="center">
   <a href="docs/SETUP.md">Setup</a> |
   <a href="docs/PROTOCOL.md">Protocol Reference</a> |
-  <a href="docs/ARCHITECTURE.md">Architecture</a>
+  <a href="docs/ARCHITECTURE.md">Architecture</a> |
+  <a href="https://youtu.be/KtQ8kid-6og">Youtube Showcase</a>
 </p>
 
 Rainflayer connects a large language model to Risk of Rain 2. A BepInEx mod exposes game state (enemies, inventory, objectives, interactables) over a local TCP socket. A Python brain queries that state every few seconds, feeds it to an LLM, and sends back strategic commands that the mod executes at 50 Hz — movement, aiming, skills, camera, all without simulating mouse or keyboard input.
@@ -56,7 +57,7 @@ directive> status
 
 **Via mod manager (recommended):** Install with [r2modman](https://thunderstore.io/package/ebkr/r2modman/) or [Thunderstore Mod Manager](https://www.overwolf.com/app/Thunderstore-Thunderstore_Mod_Manager) from the Thunderstore page.
 
-**Manually:** Download the latest release, and drop `Rainflayer.dll` into your `BepInEx/plugins/` folder.
+**Manually:** Download the latest release, and drop `Rainflayer.dll` into your `BepInEx/plugins/` folder. Repeat for dependencies.
 
 Launch RoR2 once to generate the config file, then close it.
 
@@ -103,7 +104,7 @@ directive>
 
 ### Mod config
 
-Generated at `BepInEx/config/com.rainflayer.cfg` after first run:
+Generated at `BepInEx/config/justindwang.rainflayer.cfg` after first run:
 
 ```ini
 [Rainflayer]
@@ -171,6 +172,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a technical deep dive:
 - Why direct API control was chosen over input simulation
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full socket protocol reference.
+
+---
+
+## How to Reach Me
+- Reddit: https://www.reddit.com/user/Riolutail/
+- Discord: riolutail
 
 ---
 
