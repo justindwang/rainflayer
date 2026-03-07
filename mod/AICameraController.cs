@@ -95,11 +95,13 @@ namespace Rainflayer
                 horizontalAimDir = targetBody.transform.forward; // Fallback to facing direction
             horizontalAimDir.Normalize();
 
-            // Camera offset: behind horizontally, plus height offset (now dynamic!)
+            // Camera offset: behind and slightly right of horizontally, plus height offset
             Vector3 desiredCameraOffset = -horizontalAimDir * cameraDistance;
             desiredCameraOffset.y = cameraHeight;
 
-            Vector3 desiredCameraPos = playerPos + desiredCameraOffset;
+            // Right-shoulder offset: shift camera slightly right so character is left-of-center
+            Vector3 rightOffset = Vector3.Cross(Vector3.up, horizontalAimDir).normalized * 0.6f;
+            Vector3 desiredCameraPos = playerPos + desiredCameraOffset + rightOffset;
 
             // Collision detection: raycast from player to camera position
             // If terrain is in the way, move camera closer
@@ -119,6 +121,16 @@ namespace Rainflayer
             // Camera looks in the aim direction (not at the player)
             // This ensures crosshair aligns with where shots go
             Quaternion desiredCameraRotation = Quaternion.LookRotation(aimDir);
+
+            // Clamp vertical pitch so the camera never tilts too far upward.
+            // When targeting flying enemies the aim direction can pitch steeply up, which
+            // causes the player to exit the frame entirely. Clamping preserves player visibility
+            // at the cost of crosshair accuracy on very high targets.
+            Vector3 euler = desiredCameraRotation.eulerAngles;
+            float pitch = euler.x > 180f ? euler.x - 360f : euler.x; // normalize to -180..180
+            pitch = Mathf.Clamp(pitch, -25f, 20f);
+            euler.x = pitch;
+            desiredCameraRotation = Quaternion.Euler(euler);
 
             // Initialize smoothed rotation on first frame
             if (!isInitialized)
