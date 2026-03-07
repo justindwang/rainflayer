@@ -127,9 +127,9 @@ namespace Rainflayer
             // causes the player to exit the frame entirely. Clamping preserves player visibility
             // at the cost of crosshair accuracy on very high targets.
             Vector3 euler = desiredCameraRotation.eulerAngles;
-            float pitch = euler.x > 180f ? euler.x - 360f : euler.x; // normalize to -180..180
-            pitch = Mathf.Clamp(pitch, -25f, 20f);
-            euler.x = pitch;
+            float clampedPitch = euler.x > 180f ? euler.x - 360f : euler.x; // normalize to -180..180
+            clampedPitch = Mathf.Clamp(clampedPitch, -25f, 20f);
+            euler.x = clampedPitch;
             desiredCameraRotation = Quaternion.Euler(euler);
 
             // Initialize smoothed rotation on first frame
