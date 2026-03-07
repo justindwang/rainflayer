@@ -5,6 +5,10 @@
 <p align="center"><strong>Early development — expect bugs, rough edges, and missing features.</strong></p>
 
 <p align="center">
+  <img src="assets/demo.gif" alt="Rainflayer demo" width="640">
+</p>
+
+<p align="center">
   <a href="docs/SETUP.md">Setup</a> |
   <a href="docs/PROTOCOL.md">Protocol Reference</a> |
   <a href="docs/ARCHITECTURE.md">Architecture</a> |
