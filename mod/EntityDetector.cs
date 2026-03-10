@@ -1866,10 +1866,10 @@ namespace Rainflayer
         }
 
         /// <summary>
-        /// Find a LunarTeleporter orb in the scene.
-        /// These spawn in the Mythrix arena after the fight ends and teleport players back to the moon.
-        /// Detected via EntityStateMachine whose current state is in the EntityStates.LunarTeleporter namespace.
-        /// Returns the nearest active orb, or null if none found.
+        /// Find the nearest MoonElevator escape orb that is in Ready state (Interactability.Available).
+        /// MoonElevators exist in the scene from stage load but start Inactive (ConditionsNotMet).
+        /// After Mythrix is defeated, TriggerOnArenaExit fires and transitions them to Ready (Available).
+        /// Returns the nearest Ready elevator, or null if none are ready yet (boss still alive).
         /// </summary>
         public GameObject FindLunarTeleporterOrb()
         {
@@ -1882,12 +1882,8 @@ namespace Rainflayer
 
             try
             {
-                // Use GenericInteraction component scan — same pattern as PurchaseInteraction for chests.
-                // The LunarTeleporter orb has a GenericInteraction on it (confirmed from RoR2 source:
-                // LunarTeleporterBaseState.OnEnter calls GetComponent<GenericInteraction>()).
-                // Filter by object name containing "lunar" (case-insensitive).
                 GenericInteraction[] all = GameObject.FindObjectsOfType<GenericInteraction>();
-                Log($"FindLunarTeleporterOrb: found {all?.Length ?? 0} GenericInteraction objects");
+                Log($"FindLunarTeleporterOrb: scanning {all?.Length ?? 0} GenericInteraction objects");
 
                 foreach (var gi in all)
                 {
@@ -1902,17 +1898,24 @@ namespace Rainflayer
                     catch { continue; }
 
                     string name = obj.name ?? "";
-                    Log($"  GenericInteraction: '{name}' at {obj.transform.position}");
 
-                    // The LunarTeleporter orb is named "MoonElevator" in-scene
+                    // MoonElevator is the post-Mythrix escape orb (confirmed via EntityStates.MoonElevator source)
                     if (name.IndexOf("MoonElevator", System.StringComparison.OrdinalIgnoreCase) < 0)
                         continue;
+
+                    // Only Ready-state elevators are interactable — Inactive ones exist all stage but are ConditionsNotMet
+                    if (gi.Networkinteractability != Interactability.Available)
+                    {
+                        Log($"  MoonElevator '{name}': not ready (interactability={gi.Networkinteractability}), skipping");
+                        continue;
+                    }
 
                     Vector3 pos;
                     try { pos = obj.transform.position; }
                     catch { continue; }
 
                     float dist = Vector3.Distance(playerPos, pos);
+                    Log($"  MoonElevator '{name}' READY at {pos} dist={dist:F1}m");
                     if (dist < nearestDist)
                     {
                         nearestDist = dist;
@@ -1922,13 +1925,13 @@ namespace Rainflayer
             }
             catch (System.Exception e)
             {
-                LogError($"Error finding LunarTeleporter orb: {e.Message}");
+                LogError($"Error finding MoonElevator orb: {e.Message}");
             }
 
             if (nearest != null)
-                Log($"Found LunarTeleporter orb '{nearest.name}' at {nearestDist:F1}m");
+                Log($"Found ready MoonElevator '{nearest.name}' at {nearestDist:F1}m");
             else
-                Log($"FindLunarTeleporterOrb: no matching GenericInteraction found");
+                Log($"FindLunarTeleporterOrb: no Ready MoonElevator found (Mythrix not defeated yet?)");
 
             return nearest;
         }

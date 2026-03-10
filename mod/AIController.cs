@@ -22,7 +22,14 @@ namespace Rainflayer
 
         private GameObject currentTarget;
         private bool isFollowing = false;
-        private string currentMode = "roam";  // roam, combat, follow, wait
+        private string currentMode = "roam";  // roam, combat, follow, wait, defend_zone
+
+        // defend_zone mode state
+        // One of these will be set (HoldoutZoneController for teleporter/pillars, EscapeSequenceExtractionZone for moon escape)
+        private HoldoutZoneController defendZone = null;
+        private EscapeSequenceExtractionZone defendEscapeZone = null;
+        private Vector3 defendZoneCenter = Vector3.zero;
+        private float defendZoneRadius = 0f;
 
         // Expose controllers for external access (if needed)
         public NavigationController GetNavigationController() => navigationController;
@@ -36,6 +43,18 @@ namespace Rainflayer
         private static bool IsInMythrixArena(CharacterBody body)
         {
             return body != null && body.transform.position.y >= 400f;
+        }
+
+        /// <summary>
+        /// Returns true when the moon escape sequence is actively running
+        /// (EscapeSequenceMainState = Mythrix beaten, countdown started).
+        /// False before Mythrix spawns, during the fight, and on the jump pad.
+        /// </summary>
+        private static bool IsEscapeSequenceActive()
+        {
+            EscapeSequenceController esc = UnityEngine.Object.FindObjectOfType<EscapeSequenceController>();
+            if (esc == null) return false;
+            return esc.mainStateMachine?.state is EscapeSequenceController.EscapeSequenceMainState;
         }
 
         private static bool IsGameObjectValid(GameObject obj)
@@ -158,7 +177,7 @@ namespace Rainflayer
                 navigationController.gotoInteractable = null;
                 navigationController.ClearInteractionTarget(clearZoneReturn: true);
                 navigationController.ClearIslandTracking();  // currentIsland + zoneReturnChain (full)
-                navigationController.ResetRunFlags();  // WasLaunchedByLunarTeleporter
+                navigationController.ResetRunFlags();  // WasArenaTeleported
                 Log("[RESET] ✓ Navigation state reset (including island tracking + run flags)");
             }
 
@@ -167,6 +186,11 @@ namespace Rainflayer
             currentMode = "roam";
             isFollowing = false;
             followUpdateTimer = 0f;
+            defendZone = null;
+            defendEscapeZone = null;
+            defendZoneCenter = Vector3.zero;
+            defendZoneRadius = 0f;
+            combatController?.ClearZoneLeash();
             Log("[RESET] ✓ Combat state reset");
 
             // Reset CombatController - clears stale camera refs and aim smoothing
@@ -337,13 +361,21 @@ namespace Rainflayer
             currentMode = args.ToLower();
             Log($"[MODE] Set to: {currentMode}");
 
+            // Clear zone leash whenever leaving defend_zone
+            if (prevMode == "defend_zone" && currentMode != "defend_zone")
+            {
+                combatController?.ClearZoneLeash();
+                defendZone = null;
+                defendEscapeZone = null;
+            }
+
             // Update behavior based on mode
             switch (currentMode)
             {
                 case "roam":
                     isFollowing = false;
-                    // Clear any follow-initiated navigation so combat/roam can resume
-                    if (prevMode == "follow" && navigationController != null)
+                    // Clear any follow/zone-initiated navigation so combat/roam can resume
+                    if ((prevMode == "follow" || prevMode == "defend_zone") && navigationController != null)
                     {
                         navigationController.isNavigating = false;
                         navigationController.gotoTarget = null;
@@ -351,7 +383,7 @@ namespace Rainflayer
                     break;
                 case "combat":
                     isFollowing = false;
-                    if (prevMode == "follow" && navigationController != null)
+                    if ((prevMode == "follow" || prevMode == "defend_zone") && navigationController != null)
                     {
                         navigationController.isNavigating = false;
                         navigationController.gotoTarget = null;
@@ -363,12 +395,84 @@ namespace Rainflayer
                     break;
                 case "wait":
                     isFollowing = false;
-                    if (prevMode == "follow" && navigationController != null)
+                    if ((prevMode == "follow" || prevMode == "defend_zone") && navigationController != null)
                     {
                         navigationController.isNavigating = false;
                         navigationController.gotoTarget = null;
                     }
                     break;
+                case "defend_zone":
+                {
+                    isFollowing = false;
+                    if (prevMode == "follow" && navigationController != null)
+                    {
+                        navigationController.isNavigating = false;
+                        navigationController.gotoTarget = null;
+                    }
+                    CharacterBody modeBody = RainflayerPlugin.GetPlayerBody();
+                    Vector3 modePos = modeBody != null ? modeBody.transform.position : Vector3.zero;
+                    float nearestDist = float.MaxValue;
+                    Vector3 chosenCenter = Vector3.zero;
+                    float chosenRadius = 0f;
+                    HoldoutZoneController chosenHZC = null;
+                    EscapeSequenceExtractionZone chosenESZ = null;
+
+                    // EscapeSequenceExtractionZone always takes priority over HoldoutZoneControllers
+                    // (teleporter/pillars) — it's the final escape zone and must be defended if active.
+                    // Note: EscapeSequenceExtractionZone is NOT registered with InstanceTracker,
+                    // so we must use FindObjectsOfType to find it.
+                    foreach (var z in UnityEngine.Object.FindObjectsOfType<EscapeSequenceExtractionZone>())
+                    {
+                        if (z == null || !z.isActiveAndEnabled) continue;
+                        float d = Vector3.Distance(modePos, z.transform.position);
+                        Log($"[MODE:defend_zone] Found EscapeSequenceExtractionZone at {z.transform.position}, radius={z.radius:F1}m, dist={d:F1}m");
+                        if (d < nearestDist) { nearestDist = d; chosenCenter = z.transform.position; chosenRadius = z.radius; chosenHZC = null; chosenESZ = z; }
+                    }
+
+                    // Only fall back to HoldoutZoneControllers (teleporter, moon pillars) if no
+                    // EscapeSequenceExtractionZone was found.
+                    if (chosenESZ == null)
+                    {
+                        foreach (var z in InstanceTracker.GetInstancesList<HoldoutZoneController>())
+                        {
+                            if (z == null || !z.isActiveAndEnabled) continue;
+                            float d = Vector3.Distance(modePos, z.transform.position);
+                            if (d < nearestDist) { nearestDist = d; chosenCenter = z.transform.position; chosenRadius = z.currentRadius; chosenHZC = z; chosenESZ = null; }
+                        }
+                    }
+
+                    if (chosenHZC == null && chosenESZ == null)
+                    {
+                        currentMode = prevMode;  // Revert mode change
+                        Log("[MODE:defend_zone] No active zone found (no HoldoutZoneController or EscapeSequenceExtractionZone)");
+                        socketBridge?.SendEvent("action_failed",
+                            ("command", "MODE:defend_zone"),
+                            ("reason", "no_active_zone")
+                        );
+                        return;
+                    }
+                    defendZone = chosenHZC;
+                    defendEscapeZone = chosenESZ;
+                    defendZoneCenter = chosenCenter;
+                    defendZoneRadius = chosenRadius;
+                    Log($"[MODE:defend_zone] Locked onto {(chosenESZ != null ? "EscapeZone" : "HoldoutZone")} at {chosenCenter}, radius={chosenRadius:F1}m, dist={nearestDist:F1}m");
+                    combatController?.SetZoneLeash(chosenCenter, chosenRadius);
+                    // If outside the zone, start navigating toward its center immediately
+                    if (nearestDist > chosenRadius && navigationController != null)
+                    {
+                        navigationController.gotoInteractable = new InteractableInfo
+                        {
+                            Type = "zone_center",
+                            Name = "DefendZoneCenter",
+                            Position = chosenCenter,
+                            Distance = nearestDist,
+                            WaypointChain = new Vector3[] { chosenCenter },
+                        };
+                        navigationController.gotoTarget = null;
+                        navigationController.isNavigating = true;
+                    }
+                    break;
+                }
             }
         }
 
@@ -646,49 +750,63 @@ namespace Rainflayer
             }
             else if (targetType == "ship")
             {
-                if (navigationController.WasLaunchedByLunarTeleporter)
+                // Guard: Phase 1 teleport only fires once the escape sequence is actually running
+                // (EscapeSequenceMainState active = Mythrix beaten, moon detonation started).
+                // This correctly handles: pre-spawn, mid-fight, flying up on jump pad, and the
+                // brief window after death before the escape countdown starts.
+                if (!navigationController.WasArenaTeleported && !IsEscapeSequenceActive())
                 {
-                    // Phase 2: already out of the arena — navigate via blood return path to the ship.
-                    Vector3[] shipChain = NavigationController.Moon2ShipChain;
-                    Vector3 shipPos = shipChain[shipChain.Length - 1];
-                    float distToShip = Vector3.Distance(body.transform.position, shipPos);
-                    target = new InteractableInfo
-                    {
-                        Type = "ship",
-                        Name = "RescueShip",
-                        Position = shipPos,
-                        Distance = distToShip,
-                        WaypointChain = shipChain,
-                    };
-                    Log($"[FIND_AND_INTERACT] ship Phase 2 — navigating to ship at {shipPos} ({distToShip:F1}m)");
+                    Log($"[FIND_AND_INTERACT] Escape sequence not yet active — ship command ignored (defeat Mythrix first)");
+                    socketBridge?.SendEvent("action_failed",
+                        ("command", "FIND_AND_INTERACT:ship"),
+                        ("reason", "mythrix_not_defeated")
+                    );
+                    return;
                 }
-                else
+
+                if (!navigationController.WasArenaTeleported)
                 {
-                    // Phase 1: still in the arena — find and interact with the LunarTeleporter orb.
-                    GameObject orbObj = entityDetector.FindLunarTeleporterOrb();
-                    if (orbObj != null)
+                    // Phase 1: mod-teleport the player directly to the blood room landing spot.
+                    // The arena escape orbs have no interactable representation in code — they are
+                    // pure scene-configured triggers with no GenericInteraction/PurchaseInteraction.
+                    // We skip them entirely and teleport directly to Moon2ShipChain[0].
+                    Vector3 bloodRoomLanding = NavigationController.Moon2ShipChain[0]; // (-601, -170, 35)
+                    CharacterBody playerBody = RainflayerPlugin.GetPlayerBody();
+                    if (playerBody != null)
                     {
-                        float dist = Vector3.Distance(body.transform.position, orbObj.transform.position);
-                        target = new InteractableInfo
-                        {
-                            GameObject = orbObj,
-                            Type = "ship",
-                            Name = orbObj.name,
-                            Position = orbObj.transform.position,
-                            Distance = dist,
-                        };
-                        Log($"[FIND_AND_INTERACT] ship Phase 1 — found LunarTeleporter orb '{orbObj.name}' at {dist:F1}m");
+                        // Spawn the standard out-of-bounds teleport effect at the origin (departure burst)
+                        // then teleport, then spawn the arrival burst — same pattern as MapZone.TeleportBody.
+                        GameObject tpEffect = Run.instance?.GetTeleportEffectPrefab(playerBody.gameObject);
+                        if (tpEffect != null)
+                            EffectManager.SimpleEffect(tpEffect, playerBody.transform.position, Quaternion.identity, transmit: true);
+
+                        TeleportHelper.TeleportBody(playerBody, bloodRoomLanding);
+                        Log($"[SHIP] Phase 1 — mod-teleported player to blood room {bloodRoomLanding}");
+
+                        // Arrival burst at destination
+                        if (tpEffect != null)
+                            EffectManager.SimpleEffect(tpEffect, bloodRoomLanding, Quaternion.identity, transmit: true);
                     }
                     else
                     {
-                        Log($"[FIND_AND_INTERACT] ship Phase 1 — no LunarTeleporter orb found yet (boss still alive?)");
-                        socketBridge?.SendEvent("action_failed",
-                            ("command", "FIND_AND_INTERACT:ship"),
-                            ("reason", "orb_not_found")
-                        );
-                        return;
+                        Log($"[SHIP] Phase 1 — player body null, cannot teleport");
                     }
+                    navigationController.WasArenaTeleported = true;
                 }
+
+                // Phase 2: navigate Moon2ShipChain from blood room to rescue ship.
+                Vector3[] shipChain = NavigationController.Moon2ShipChain;
+                Vector3 shipPos = shipChain[shipChain.Length - 1];
+                float distToShip = Vector3.Distance(body.transform.position, shipPos);
+                target = new InteractableInfo
+                {
+                    Type = "ship",
+                    Name = "RescueShip",
+                    Position = shipPos,
+                    Distance = distToShip,
+                    WaypointChain = shipChain,
+                };
+                Log($"[FIND_AND_INTERACT] ship Phase 2 — navigating to ship at {shipPos} ({distToShip:F1}m)");
             }
             else if (targetType == "shop")
             {
@@ -1051,12 +1169,13 @@ namespace Rainflayer
                     bool arrived = navigationController.HandleGotoNavigation(body);
                     if (arrived)
                     {
-                        if (currentMode == "follow")
+                        if (currentMode == "follow" || navigationController.gotoInteractable?.Type == "zone_center")
                         {
-                            // Arrived at ally - clear nav so combat logic can run this frame
+                            // Arrived at ally or zone center - clear nav so combat logic can run this frame
                             navigationController.isNavigating = false;
                             navigationController.gotoTarget = null;
-                            // Fall through to combat logic below
+                            navigationController.gotoInteractable = null;
+                            // Fall through to combat/defend_zone logic below
                         }
                         else
                         {
@@ -1104,17 +1223,6 @@ namespace Rainflayer
                                     navigationController.gotoTarget = null;
                                     navigationController.isNavigating = false;
                                     Log($"[SHIP] Arrived at rescue ship — escape complete, action_complete sent");
-                                }
-                                else if (interactable.Type == "ship" && interactable.GameObject != null)
-                                {
-                                    // Phase 1 of FIND_AND_INTERACT:ship — arrived near the LunarTeleporter orb.
-                                    // The orb is a walk-into trigger (not press-E), so just clear nav state and
-                                    // keep moving. The teleport detection in HandleGotoNavigation will fire when
-                                    // the orb teleports the player, setting WasLaunchedByLunarTeleporter=true.
-                                    navigationController.gotoInteractable = null;
-                                    navigationController.gotoTarget = null;
-                                    navigationController.isNavigating = false;
-                                    Log($"[SHIP] Arrived near LunarTeleporter orb '{interactable.Name}' — waiting for auto-teleport");
                                 }
                                 else
                                 {
@@ -1168,6 +1276,57 @@ namespace Rainflayer
                         body.inputBank.sprint.PushState(false);
                     body.isSprinting = false;
                     return;  // Don't do anything else in wait mode
+                }
+
+                if (currentMode == "defend_zone")
+                {
+                    // Re-validate zone each frame — check both zone types
+                    bool zoneValid = (defendZone != null && defendZone.isActiveAndEnabled)
+                                  || (defendEscapeZone != null && defendEscapeZone.isActiveAndEnabled);
+                    if (!zoneValid)
+                    {
+                        Log("[MODE:defend_zone] Zone became inactive, reverting to roam");
+                        currentMode = "roam";
+                        combatController?.ClearZoneLeash();
+                        defendZone = null;
+                        defendEscapeZone = null;
+                        if (navigationController != null)
+                        {
+                            navigationController.isNavigating = false;
+                            navigationController.gotoTarget = null;
+                            navigationController.gotoInteractable = null;
+                        }
+                    }
+                    else
+                    {
+                        // Update center+radius each frame (HZC radius scales as zone charges; ESZ radius is fixed)
+                        if (defendZone != null)
+                        {
+                            defendZoneCenter = defendZone.transform.position;
+                            defendZoneRadius = defendZone.currentRadius;
+                        }
+                        else
+                        {
+                            defendZoneCenter = defendEscapeZone.transform.position;
+                            defendZoneRadius = defendEscapeZone.radius;
+                        }
+                        combatController?.SetZoneLeash(defendZoneCenter, defendZoneRadius);
+                        // Cancel the initial zone-center navigation once we've arrived inside the zone.
+                        // After that, CombatController's zone leash clamps all roam/strafe movement
+                        // to stay within the radius — no per-frame re-navigation needed.
+                        if (navigationController != null && navigationController.isNavigating
+                            && navigationController.gotoInteractable?.Type == "zone_center")
+                        {
+                            float distToCenter = Vector3.Distance(body.transform.position, defendZoneCenter);
+                            if (distToCenter <= defendZoneRadius)
+                            {
+                                navigationController.isNavigating = false;
+                                navigationController.gotoInteractable = null;
+                                navigationController.gotoTarget = null;
+                            }
+                        }
+                        // Fall through to normal combat logic below
+                    }
                 }
 
                 // DIRECT CONTROL: Write to InputBank instead of relying on BaseAI skill drivers

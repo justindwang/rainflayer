@@ -62,7 +62,9 @@ class RoR2GameState:
         self.num_enemies = combat_status.enemy_count
         self.closest_enemy_distance = combat_status.nearest_enemy_distance
         self.current_strategy = combat_status.strategy
-        self.current_mode = combat_status.mode
+        # current_mode is NOT overwritten here — the brain is the authority on mode.
+        # The mod's QUERY_COMBAT_STATUS doesn't report mode, so the default fallback
+        # would reset it to 'roam' every poll cycle, causing spurious re-sends.
 
     def update_from_objective(self, objective: ObjectiveData):
         self.scene_name = objective.scene_name

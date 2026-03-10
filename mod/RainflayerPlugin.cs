@@ -13,7 +13,7 @@ namespace Rainflayer
     /// Main BepInEx plugin for Rainflayer — RoR2 AI brain integration.
     /// Enables AI to control a player character via BaseAI and external commands.
     /// </summary>
-    [BepInPlugin("justindwang.rainflayer", "Rainflayer", "1.0.0")]
+    [BepInPlugin("justindwang.rainflayer", "Rainflayer", "1.1.1")]
     public class RainflayerPlugin : BaseUnityPlugin
     {
         // Static references for easy access
@@ -26,6 +26,7 @@ namespace Rainflayer
         public static ConfigEntry<bool> EnableAIControl { get; private set; }
         public static ConfigEntry<bool> DebugMode { get; private set; }
         public static ConfigEntry<bool> RecordWaypoints { get; private set; }
+        public static ConfigEntry<bool> PillarSkip { get; private set; }
 
         // Components
         public AIController aiController;  // Made public for SocketBridge access
@@ -79,6 +80,13 @@ namespace Rainflayer
                 "RecordWaypoints",
                 false,
                 "When true, log player position + NodeGraph reachability every ~2.5s. Walk from ship to each pillar island. Look for [WP] lines in BepInEx/LogOutput.log — the last reachable=True before it flips False marks the subgraph boundary. Copy those coords into NavigationController.Moon2PillarChains."
+            );
+
+            PillarSkip = Config.Bind(
+                "Debug",
+                "PillarSkip",
+                false,
+                "When true, instantly fully charge all moon battery pillars upon entering the moon2 (Commencement) stage. Use for debugging."
             );
         }
 
@@ -142,8 +150,82 @@ namespace Rainflayer
                 Log("[Stage] New stage - reset drop pod state and camera");
             }
 
+            // PillarSkip: instantly charge all moon batteries on moon2
+            if (PillarSkip.Value)
+            {
+                string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                if (sceneName == "moon2")
+                {
+                    Log("[PillarSkip] moon2 detected — scheduling pillar auto-charge");
+                    // Delay one frame so all scene objects finish initialising before we touch them
+                    StartCoroutine(AutoChargePillarsCoroutine());
+                }
+            }
+
             // Call original
             return orig(self);
+        }
+
+        private System.Collections.IEnumerator AutoChargePillarsCoroutine()
+        {
+            // Wait a few seconds for EntityStateMachines and HoldoutZoneControllers to initialize
+            yield return new WaitForSeconds(3f);
+
+            // Pass 1: force any Inactive battery ESMs into Active state so their
+            // HoldoutZoneController gets enabled (HZC is only active during MoonBatteryActive).
+            // Flow: MoonBatteryInactive → [player hits] → MoonBatteryActive → [charge=1] → MoonBatteryComplete
+            // We drive the ESM directly to skip the player interaction step.
+            try
+            {
+                foreach (var esm in GameObject.FindObjectsOfType<EntityStateMachine>())
+                {
+                    if (esm == null) continue;
+                    GameObject obj = esm.gameObject;
+                    if (!obj.activeInHierarchy) continue;
+                    if (!obj.name.ToLower().Contains("battery")) continue;
+                    if (obj.GetComponent<TeleporterInteraction>() != null) continue;
+
+                    if (esm.state is EntityStates.Missions.Moon.MoonBatteryInactive)
+                    {
+                        esm.SetNextState(new EntityStates.Missions.Moon.MoonBatteryActive());
+                        Log($"[PillarSkip] '{obj.name}' forced Inactive → Active");
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                LogError($"[PillarSkip] Exception during ESM activation pass: {e.Message}");
+            }
+
+            // Wait one fixed frame for the state transition to settle
+            yield return new WaitForFixedUpdate();
+
+            // Pass 2: use InstanceTracker (same as DebugToolkit's charge_zone command) to
+            // find all live HoldoutZoneControllers and set their charge to 1.
+            int chargedCount = 0;
+            try
+            {
+                foreach (var zone in InstanceTracker.GetInstancesList<HoldoutZoneController>())
+                {
+                    if (zone == null) continue;
+                    // Skip the teleporter — only charge moon battery pillars
+                    if (zone.GetComponent<TeleporterInteraction>() != null) continue;
+
+                    // Network_charge has a public setter; charge has private set.
+                    // Setting Network_charge to 1f is enough — HoldoutZoneController.FixedUpdate
+                    // will see charge >= 1f on the next tick and fire onCharged itself.
+                    zone.Network_charge = 1f;
+
+                    chargedCount++;
+                    Log($"[PillarSkip] Charged HoldoutZoneController on '{zone.gameObject.name}'");
+                }
+            }
+            catch (System.Exception e)
+            {
+                LogError($"[PillarSkip] Exception during charge pass: {e.Message}");
+            }
+
+            Log($"[PillarSkip] Done — charged {chargedCount} zone(s)");
         }
 
         private void Run_Start(On.RoR2.Run.orig_Start orig, Run self)

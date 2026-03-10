@@ -46,10 +46,10 @@ namespace Rainflayer
         private const float NAV_MOVE_SMOOTH = 0.15f;  // Move direction lerp factor per fixed frame
         private const float NAV_AIM_SMOOTH = 0.07f;   // Aim/camera lerp factor (slower = smoother camera)
 
-        // Set to true when the LunarTeleporter interaction completes and teleports the player
-        // out of the Mythrix arena back to the moon surface.
-        // Switches FIND_AND_INTERACT:ship from Phase 1 (find orb) to Phase 2 (navigate to ship).
-        public bool WasLaunchedByLunarTeleporter = false;
+        // Set to true after the mod teleports the player out of the Mythrix arena to the blood
+        // room landing spot. Switches FIND_AND_INTERACT:ship from Phase 1 (arena escape teleport)
+        // to Phase 2 (navigate Moon2ShipChain to the rescue ship).
+        public bool WasArenaTeleported = false;
 
         // Enhanced stuck detection with frustration
         private float frustration = 0f;  // Increases when stuck, resets when making progress
@@ -293,7 +293,7 @@ namespace Rainflayer
 
         // Waypoint recorder (RecordWaypoints config)
         private float waypointRecordTimer = 0f;
-        private const float WAYPOINT_RECORD_INTERVAL = 2.5f;
+        private const float WAYPOINT_RECORD_INTERVAL = 1f;
         private Vector3 waypointShipOrigin = Vector3.zero;
         private bool waypointOriginCaptured = false;
 
@@ -374,9 +374,9 @@ namespace Rainflayer
             new Vector3( 222f, -182f,  84f),  // [7] post-ledge — on teleporter (override with beeline)
         };
 
-        // Waypoint chain for Phase 2 of FIND_AND_INTERACT:ship (post-LunarTeleporter escape).
-        // After the LunarTeleporter orb teleports the player back near the blood pillar area,
-        // this chain follows the blood return path back to the main platform, then to the ship.
+        // Waypoint chain for Phase 2 of FIND_AND_INTERACT:ship (post-arena escape).
+        // Phase 1 mod-teleports the player directly to the blood room ([1] below).
+        // Phase 2 follows this chain back through the blood passage to the main platform, then to the ship.
         public static readonly Vector3[] Moon2ShipChain = new Vector3[]
         {
             new Vector3(-601f, -170f,  35f),  // [1] blood room (post-orb landing area)
@@ -999,9 +999,7 @@ namespace Rainflayer
                 return false;
 
             // If the nav target changed since last frame, reset lastPosition so the teleport detector
-            // doesn't false-fire on the first frame of the new session. This handles cases where
-            // gotoTarget=null for both the cleared state and snapped-position types (pillar, jump_pad,
-            // ship Phase 1) — the gotoInteractable comparison catches those.
+            // doesn't false-fire on the first frame of the new session.
             if (gotoTarget != lastGotoTarget || gotoInteractable != lastGotoInteractable)
             {
                 lastPosition = Vector3.zero;
@@ -1014,12 +1012,7 @@ namespace Rainflayer
                 Vector3.Distance(body.transform.position, lastPosition) > TELEPORT_DETECT_DIST)
             {
                 Log($"[GOTO] Teleport detected (moved {Vector3.Distance(body.transform.position, lastPosition):F1}m in one frame) — clearing nav");
-                if (gotoInteractable?.Type == "ship" && !WasLaunchedByLunarTeleporter)
-                {
-                    // LunarTeleporter interaction teleported us out of the arena — advance to Phase 2
-                    WasLaunchedByLunarTeleporter = true;
-                    Log($"[GOTO] LunarTeleporter launch confirmed via teleport detection — WasLaunchedByLunarTeleporter=true");
-                }
+                // No special teleport handling needed for ship — arena escape is done via mod teleport.
                 ClearFullNavigationState("teleported");
                 return false;
             }
@@ -1318,10 +1311,7 @@ namespace Rainflayer
             // - Steers around non-jumpable obstacles by blending in a perpendicular component
             // Chain jump triggers (elevation + gap) only when beelining and not already
             // very close to the waypoint (prevents spam-jumping near the arrival sphere).
-            // Also enable for ship Phase 1 (airborne LunarTeleporter orb) so the bot jumps
-            // to reach the orb when beelining directly at it.
-            bool isShipPhase1Nav = gotoInteractable?.Type == "ship" && gotoTarget != null;
-            bool passChainTarget = (isChainPhase || isShipPhase1Nav) && isBeelining && distance > arrivalThreshold;
+            bool passChainTarget = isChainPhase && isBeelining && distance > arrivalThreshold;
             Vector3? chainJumpTarget = passChainTarget ? (Vector3?)targetPosition : null;
             direction = ApplyJumpDetection(body, direction, chainJumpTarget);
 
@@ -1441,8 +1431,8 @@ namespace Rainflayer
         /// </summary>
         public void ResetRunFlags()
         {
-            WasLaunchedByLunarTeleporter = false;
-            Log("[NAV] Run flags reset (WasLaunchedByLunarTeleporter)");
+            WasArenaTeleported = false;
+            Log("[NAV] Run flags reset (WasArenaTeleported)");
         }
 
         /// <summary>

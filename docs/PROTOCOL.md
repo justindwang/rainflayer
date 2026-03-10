@@ -217,6 +217,7 @@ Moon2 islands: `blood`, `soul`, `mass`, `design`
 | `MODE` | `combat` | Stay focused on nearby enemies |
 | `MODE` | `follow` | Follow nearest ally |
 | `MODE` | `wait` | Stop all movement |
+| `MODE` | `defend_zone` | Navigate into and stay inside the nearest active holdout zone (teleporter, moon2 pillar, or escape sequence extraction zone) |
 
 ---
 
@@ -240,6 +241,7 @@ The mod can push events to Python over the same TCP connection without being que
 - `failed (cancelled)` — action was cancelled
 - `failed (no gold)` — insufficient gold to open chest
 - `failed (in_mythrix_arena)` — pillar/jump_pad command issued but player is already inside the Mythrix arena; switch to `MODE:combat` instead of retrying
+- `failed (no_active_zone)` — `MODE:defend_zone` issued but no active holdout zone was found; fall back to `MODE:combat` and wait
 
 The brain tracks these outcomes as action history and feeds them back to the LLM so it can retry or adapt.
 

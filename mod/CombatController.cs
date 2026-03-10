@@ -67,6 +67,16 @@ namespace Rainflayer
         private System.Collections.Generic.HashSet<string> sprintDelayList = new System.Collections.Generic.HashSet<string>();
         private float sprintDelayTimer = 0f;
 
+        // Zone leash: when set, roam waypoints and combat movement are clamped inside this radius
+        private bool hasZoneLeash = false;
+        private Vector3 zoneLeashCenter;
+        private float zoneLeashRadius;
+        private float zoneLeashLogTimer = 0f;
+        private const float ZONE_LEASH_LOG_INTERVAL = 1f;
+
+        public void SetZoneLeash(Vector3 center, float radius) { hasZoneLeash = true; zoneLeashCenter = center; zoneLeashRadius = radius; roamWaypoint = null; }
+        public void ClearZoneLeash() { hasZoneLeash = false; roamWaypoint = null; }
+
         // Roam waypoints with exploration tracking
         private Vector3? roamWaypoint = null;
         private const float ROAM_WAYPOINT_DISTANCE = 30f; // How far to explore before picking new waypoint
@@ -427,6 +437,23 @@ namespace Rainflayer
                     body.inputBank.moveVector = moveDirection.normalized * 0.8f;
                 }
             }
+
+            // Zone leash: if outside threshold (XZ), override movement back toward center.
+            // XZ-only because zone centers may be at a different height than the player.
+            if (hasZoneLeash)
+            {
+                Vector3 playerPos2 = body.transform.position;
+                Vector3 toCenter = zoneLeashCenter - playerPos2;
+                toCenter.y = 0;
+                float distToCenter = toCenter.magnitude;
+                if (distToCenter > zoneLeashRadius * 0.8f)
+                {
+                    // Outside or near edge — steer back toward center
+                    body.inputBank.moveVector = toCenter.normalized;
+                    if (Time.frameCount % 60 == 0)
+                        Log($"[ZONE-LEASH] combat override: XZ-dist={distToCenter:F1}m > {zoneLeashRadius * 0.8f:F1}m — steering back to center");
+                }
+            }
         }
 
         /// <summary>
@@ -615,6 +642,19 @@ namespace Rainflayer
             // EXPLORATION-BASED ROAMING: Track visited positions and prefer unexplored areas
             Vector3 playerPos = body.transform.position;
 
+            // 1-second periodic zone leash status log (same cadence as waypoint recorder)
+            if (hasZoneLeash)
+            {
+                zoneLeashLogTimer += Time.fixedDeltaTime;
+                if (zoneLeashLogTimer >= ZONE_LEASH_LOG_INTERVAL)
+                {
+                    zoneLeashLogTimer = 0f;
+                    Vector3 toCenter = zoneLeashCenter - playerPos; toCenter.y = 0;
+                    float xzDist = toCenter.magnitude;
+                    Log($"[ZONE-LEASH] playerXZ=({playerPos.x:F0},{playerPos.z:F0}) center=({zoneLeashCenter.x:F0},{zoneLeashCenter.z:F0}) XZ-dist={xzDist:F1}m radius={zoneLeashRadius:F1}m inside={xzDist <= zoneLeashRadius} roamWp={roamWaypoint?.ToString("F0") ?? "none"}");
+                }
+            }
+
             // Track visited positions (record every 10m of movement)
             if (Vector3.Distance(playerPos, lastRecordedPosition) > VISITED_POSITIONS_GRID_SIZE)
             {
@@ -654,6 +694,20 @@ namespace Rainflayer
                     {
                         candidateWaypoint = hit.point;
 
+                        // If zone leash is active, clamp candidate XZ to inside the zone radius.
+                        // Keep the candidate's ground Y — the zone center may be at a different height.
+                        if (hasZoneLeash)
+                        {
+                            Vector3 toCandidate = candidateWaypoint - zoneLeashCenter;
+                            toCandidate.y = 0;
+                            if (toCandidate.magnitude > zoneLeashRadius * 0.85f)
+                            {
+                                Vector3 clampedXZ = new Vector3(zoneLeashCenter.x, 0, zoneLeashCenter.z)
+                                    + toCandidate.normalized * (zoneLeashRadius * 0.85f);
+                                candidateWaypoint = new Vector3(clampedXZ.x, candidateWaypoint.y, clampedXZ.z);
+                            }
+                        }
+
                         // Score this waypoint based on distance from visited positions
                         float minDistanceToVisited = float.MaxValue;
                         foreach (Vector3 visited in visitedPositions)
@@ -682,7 +736,12 @@ namespace Rainflayer
                 if (bestWaypoint != Vector3.zero)
                 {
                     roamWaypoint = bestWaypoint;
-                    if (Time.frameCount % 120 == 0) // Log every 2 seconds
+                    if (hasZoneLeash)
+                    {
+                        Vector3 toWp = bestWaypoint - zoneLeashCenter; toWp.y = 0;
+                        Log($"[ZONE-LEASH] New roam waypoint: {bestWaypoint:F0}  XZ-dist-from-center={toWp.magnitude:F1}m  radius={zoneLeashRadius:F1}m");
+                    }
+                    else if (Time.frameCount % 120 == 0)
                     {
                         Log($"[ROAM] New waypoint: exploring unexplored area (score: {bestScore:F1}m from visited)");
                     }
@@ -696,7 +755,21 @@ namespace Rainflayer
                         0f,
                         Mathf.Sin(randomAngle * Mathf.Deg2Rad)
                     );
-                    roamWaypoint = playerPos + randomDirection * 20f;
+                    Vector3 fallback = playerPos + randomDirection * 20f;
+                    if (hasZoneLeash)
+                    {
+                        Vector3 toFallback = fallback - zoneLeashCenter;
+                        toFallback.y = 0;
+                        if (toFallback.magnitude > zoneLeashRadius * 0.85f)
+                        {
+                            Vector3 clampedXZ = new Vector3(zoneLeashCenter.x, 0, zoneLeashCenter.z)
+                                + toFallback.normalized * (zoneLeashRadius * 0.85f);
+                            fallback = new Vector3(clampedXZ.x, fallback.y, clampedXZ.z);
+                        }
+                        Vector3 toFb = fallback - zoneLeashCenter; toFb.y = 0;
+                        Log($"[ZONE-LEASH] Fallback roam waypoint: {fallback:F0}  XZ-dist-from-center={toFb.magnitude:F1}m  radius={zoneLeashRadius:F1}m");
+                    }
+                    roamWaypoint = fallback;
                 }
             }
 
@@ -722,6 +795,20 @@ namespace Rainflayer
             {
                 // Apply jump detection to navigate over obstacles
                 Vector3 moveDirection = controller.GetNavigationController().ApplyJumpDetection(body, directionToWaypoint.normalized);
+
+                // Zone leash: if outside threshold (XZ), override movement back toward center.
+                // XZ-only because zone centers may be at a different height than the player.
+                if (hasZoneLeash)
+                {
+                    Vector3 toCenter = zoneLeashCenter - playerPos;
+                    toCenter.y = 0;
+                    if (toCenter.magnitude > zoneLeashRadius * 0.8f)
+                    {
+                        Log($"[ZONE-LEASH] roam override: XZ-dist={toCenter.magnitude:F1}m > {zoneLeashRadius * 0.8f:F1}m — steering back to center, clearing waypoint");
+                        moveDirection = toCenter.normalized;
+                        roamWaypoint = null; // force new waypoint once back inside
+                    }
+                }
 
                 // Move toward waypoint
                 body.inputBank.moveVector = moveDirection * ROAM_SPEED;
