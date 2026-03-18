@@ -74,6 +74,11 @@ class RoR2BrainController:
         # Optional callback for Soul-layer integration
         self.on_decision_callback: Optional[callable] = None
 
+        # Set by run_started event OR by QUERY_CONFIG on connect.
+        # When False, skip LLM/heuristic decisions entirely (counterboss still works).
+        self.ai_control_enabled: bool = True
+        self._config_fetched: bool = False  # fetched once per connection via QUERY_CONFIG
+
         logger.info(f"[{ts()}] [Brain] Initialized — interval={update_interval}s, "
                     f"LLM={'yes' if brain_model else 'no (heuristics)'}")
 
@@ -106,8 +111,18 @@ class RoR2BrainController:
                     # Skip everything when disconnected (avoids spamming failed queries)
                     if not self.bridge.is_connected():
                         logger.debug(f"[{ts()}] [Brain] Bridge not connected — waiting for reconnect")
+                        self._config_fetched = False  # reset so we re-fetch on next connect
                         await asyncio.sleep(self.update_interval)
                         continue
+
+                    # On first iteration after (re)connect, fetch config to get ai_control state
+                    # without waiting for a run_started event (handles mid-run Python restarts).
+                    if not self._config_fetched:
+                        cfg = self.bridge.query_config()
+                        if cfg is not None:
+                            self.ai_control_enabled = bool(cfg.get("enable_ai_control", True))
+                            logger.info(f"[{ts()}] [Brain] Config fetched on connect: ai_control_enabled={self.ai_control_enabled}")
+                            self._config_fetched = True
 
                     # Query game state
                     interactables = self.bridge.query_interactables()
@@ -145,7 +160,13 @@ class RoR2BrainController:
                     self._check_action_completion(interactables)
                     self._try_auto_clear_directive()
 
-                    # Generate and execute decision
+                    # Generate and execute decision — skip when AI control is disabled in C# config
+                    if not self.ai_control_enabled:
+                        logger.info(f"[{ts()}] [Brain] AI control disabled — skipping decision")
+                        await asyncio.sleep(self.update_interval)
+                        continue
+
+                    logger.info(f"[{ts()}] [Brain] ai_control_enabled={self.ai_control_enabled} — generating decision")
                     decision = await self._generate_decision()
                     await self._execute_decision(decision)
 
@@ -327,7 +348,7 @@ class RoR2BrainController:
     # ------------------------------------------------------------------
 
     def _add_to_ledger(self, command: str, status: str = "pending", reason: str = ""):
-        self.action_ledger.append({"command": command, "status": status, "reason": reason})
+        self.action_ledger.append({"command": command, "status": status, "reason": reason, "ts": time.time()})
         if len(self.action_ledger) > self.max_ledger_entries:
             self.action_ledger.pop(0)
 
@@ -338,6 +359,10 @@ class RoR2BrainController:
             return
 
         event_data = {k: v for k, v in event.items() if k not in ("type", "event_type")}
+
+        if event_name == "run_started":
+            # ai_control_enabled is now set via QUERY_CONFIG on connect; skip here.
+            return
 
         if event_name == "action_started":
             command = event_data.get("command", "")
@@ -404,6 +429,9 @@ class RoR2BrainController:
         elif event_name == "low_health":
             logger.warning(f"[{ts()}] [Brain] Low health event received")
 
+        elif event_name == "counterboss_died":
+            logger.info(f"[{ts()}] [Brain] Adversary defeated — item stolen")
+
     def _check_action_completion(self, current_interactables):
         """Mark pending FIND_AND_INTERACT actions successful if the target disappeared."""
         current_ids = set((i.type, i.name) for i in current_interactables) if current_interactables else set()
@@ -421,6 +449,7 @@ class RoR2BrainController:
                         action["command"].startswith(f"FIND_AND_INTERACT:{inter_type}"):
                     action["status"] = "success"
                     action["reason"] = f"{inter_name} opened"
+                    action["ts"] = time.time()
                     logger.info(f"[{ts()}] [Brain] success: {action['command']} ({inter_name} opened)")
 
         self.last_seen_interactables = current_ids
@@ -432,6 +461,7 @@ class RoR2BrainController:
                 if action["status"] in ("pending", "interrupted") and "teleporter" in action["command"].lower():
                     action["status"] = "success"
                     action["reason"] = "teleporter activated (boss spawned)"
+                    action["ts"] = time.time()
                     logger.info(f"[{ts()}] [Brain] teleporter activation confirmed")
         self._prev_boss_active = boss_now
 
@@ -497,6 +527,10 @@ class RoR2BrainController:
             return
         for action in self.action_ledger[-5:]:
             if action["status"] == "success" and self._action_matches_directive(action["command"]):
+                # Only clear if this ledger entry was added after the directive was set.
+                # Prevents stale pre-directive successes from immediately clearing a new directive.
+                if action.get("ts", 0) <= (self.directive_timestamp or 0):
+                    continue
                 logger.info(f"[{ts()}] [Brain] Directive completed: '{self.user_directive}'")
                 self.user_directive = None
                 self.directive_timestamp = None

@@ -44,6 +44,10 @@ class SocketBridge:
         self._event_queue: queue.Queue = queue.Queue(maxsize=200)
         self._reader_thread: Optional[threading.Thread] = None
 
+        # Optional callback for counterboss-relevant events (item_picked_up, run_started).
+        # Set by CounterbossWorker so it gets events immediately without waiting for the brain loop.
+        self._counterboss_callback = None
+
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
@@ -189,6 +193,18 @@ class SocketBridge:
                     continue
 
                 if msg.get("type") == "EVENT":
+                    event_type = msg.get("event_type", "")
+
+                    # Route counterboss events directly to the worker callback
+                    # so they're handled immediately, not on the 4s brain loop.
+                    _COUNTERBOSS_EVENTS = ("item_picked_up", "run_started", "stage_started")
+                    if event_type in _COUNTERBOSS_EVENTS and self._counterboss_callback is not None:
+                        try:
+                            self._counterboss_callback(msg)
+                        except Exception:
+                            pass
+
+                    # All events also go to the standard brain event queue
                     try:
                         self._event_queue.put_nowait(msg)
                     except queue.Full:

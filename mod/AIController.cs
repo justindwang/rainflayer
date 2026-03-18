@@ -36,19 +36,19 @@ namespace Rainflayer
         public CombatController GetCombatController() => combatController;
 
         /// <summary>
-        /// Returns true when the player is in the Mythrix arena (Y >= 400).
+        /// Returns true when the player is in the Mithrix arena (Y >= 400).
         /// Used to suppress pillar/jump_pad commands that are only relevant on the moon surface.
         /// More reliable than WasLaunchedByJumpPad which could false-positive on fall/respawn teleports.
         /// </summary>
-        private static bool IsInMythrixArena(CharacterBody body)
+        private static bool IsInMithrixArena(CharacterBody body)
         {
             return body != null && body.transform.position.y >= 400f;
         }
 
         /// <summary>
         /// Returns true when the moon escape sequence is actively running
-        /// (EscapeSequenceMainState = Mythrix beaten, countdown started).
-        /// False before Mythrix spawns, during the fight, and on the jump pad.
+        /// (EscapeSequenceMainState = Mithrix beaten, countdown started).
+        /// False before Mithrix spawns, during the fight, and on the jump pad.
         /// </summary>
         private static bool IsEscapeSequenceActive()
         {
@@ -662,13 +662,13 @@ namespace Rainflayer
             else if (targetType == "pillar")
             {
                 // Pillar commands are only valid on the moon surface (Y < 400). Once in the
-                // Mythrix arena the pillars don't exist and the command makes no sense.
-                if (IsInMythrixArena(body))
+                // Mithrix arena the pillars don't exist and the command makes no sense.
+                if (IsInMithrixArena(body))
                 {
-                    Log($"[FIND_AND_INTERACT] In Mythrix arena (Y={body.transform.position.y:F0}) — pillar command ignored");
+                    Log($"[FIND_AND_INTERACT] In Mithrix arena (Y={body.transform.position.y:F0}) — pillar command ignored");
                     socketBridge?.SendEvent("action_failed",
                         ("command", "FIND_AND_INTERACT:pillar"),
-                        ("reason", "in_mythrix_arena")
+                        ("reason", "in_mithrix_arena")
                     );
                     return;
                 }
@@ -702,18 +702,18 @@ namespace Rainflayer
             else if (targetType == "jump_pad")
             {
                 // Jump pad is only navigable from the moon surface. If we're already in the
-                // Mythrix arena (Y >= 400) there's nowhere to navigate to.
-                if (IsInMythrixArena(body))
+                // Mithrix arena (Y >= 400) there's nowhere to navigate to.
+                if (IsInMithrixArena(body))
                 {
-                    Log($"[FIND_AND_INTERACT] In Mythrix arena (Y={body.transform.position.y:F0}) — jump_pad command ignored");
+                    Log($"[FIND_AND_INTERACT] In Mithrix arena (Y={body.transform.position.y:F0}) — jump_pad command ignored");
                     socketBridge?.SendEvent("action_failed",
                         ("command", "FIND_AND_INTERACT:jump_pad"),
-                        ("reason", "in_mythrix_arena")
+                        ("reason", "in_mithrix_arena")
                     );
                     return;
                 }
 
-                // Find the nearest active JumpVolume — the launch pad to the Mythrix arena
+                // Find the nearest active JumpVolume — the launch pad to the Mithrix arena
                 GameObject jumpPadObj = entityDetector.FindMoonJumpPad();
                 if (jumpPadObj != null)
                 {
@@ -751,15 +751,15 @@ namespace Rainflayer
             else if (targetType == "ship")
             {
                 // Guard: Phase 1 teleport only fires once the escape sequence is actually running
-                // (EscapeSequenceMainState active = Mythrix beaten, moon detonation started).
+                // (EscapeSequenceMainState active = Mithrix beaten, moon detonation started).
                 // This correctly handles: pre-spawn, mid-fight, flying up on jump pad, and the
                 // brief window after death before the escape countdown starts.
                 if (!navigationController.WasArenaTeleported && !IsEscapeSequenceActive())
                 {
-                    Log($"[FIND_AND_INTERACT] Escape sequence not yet active — ship command ignored (defeat Mythrix first)");
+                    Log($"[FIND_AND_INTERACT] Escape sequence not yet active — ship command ignored (defeat Mithrix first)");
                     socketBridge?.SendEvent("action_failed",
                         ("command", "FIND_AND_INTERACT:ship"),
-                        ("reason", "mythrix_not_defeated")
+                        ("reason", "mithrix_not_defeated")
                     );
                     return;
                 }

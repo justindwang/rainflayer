@@ -118,9 +118,13 @@ namespace Rainflayer
             queryHandlers["QUERY_INTERACTABLES"] = HandleQueryInteractables;
             queryHandlers["QUERY_ALLIES"] = HandleQueryAllies;
             queryHandlers["QUERY_PILLARS"] = HandleQueryPillars;
+            queryHandlers["QUERY_CONFIG"] = HandleQueryConfig;
 
             // Command handlers (execute via AIController, return status via socket)
             queryHandlers["COMMAND"] = HandleCommand;
+
+            // Counterboss: Python sends a rich JSON payload (not a simple COMMAND)
+            queryHandlers["COUNTERBOSS_SPAWN"] = HandleCounterbossSpawn;
         }
 
         void ConnectionLoop()
@@ -324,6 +328,13 @@ namespace Rainflayer
         // ==================== QUERY HANDLERS ====================
         // These run on the MAIN THREAD (dispatched via Update → mainThreadQueue).
         // Safe to call any Unity API here.
+
+        public void HandleQueryConfig(string queryJson = null)
+        {
+            string enableAi = RainflayerPlugin.EnableAIControl.Value ? "true" : "false";
+            string enableCb = RainflayerPlugin.EnableCounterboss.Value ? "true" : "false";
+            SendResponse("{\"type\":\"CONFIG\",\"enable_ai_control\":" + enableAi + ",\"enable_counterboss\":" + enableCb + "}");
+        }
 
         public void HandleQueryInventory(string queryJson = null)
         {
@@ -816,6 +827,355 @@ namespace Rainflayer
             lock (lockObj)
             {
                 return connected;
+            }
+        }
+
+        // ==================== COUNTERBOSS HANDLERS ====================
+
+        /// <summary>
+        /// Handles COUNTERBOSS_SPAWN message from Python.
+        /// Parses the item list and reasoning, then delegates to CounterbossController.
+        /// Called on the main thread (safe for all Unity API calls).
+        ///
+        /// Expected JSON format:
+        /// {
+        ///   "type": "COUNTERBOSS_SPAWN",
+        ///   "items": [{"name": "Syringe", "count": 3}, ...],
+        ///   "reasoning": "Detected attack speed build...",
+        ///   "source": "llm"
+        /// }
+        /// </summary>
+        void HandleCounterbossSpawn(string json)
+        {
+            try
+            {
+                DebugLog("[Counterboss] HandleCounterbossSpawn received");
+
+                if (!RainflayerPlugin.EnableCounterboss.Value)
+                {
+                    DebugLog("[Counterboss] EnableCounterboss=false — ignoring spawn");
+                    SendResponse("{\"type\": \"COUNTERBOSS_RESPONSE\", \"status\": \"disabled\"}");
+                    return;
+                }
+
+                // Parse reasoning
+                string reasoning = "Counter-build activated";
+                int reasoningStart = json.IndexOf("\"reasoning\":");
+                if (reasoningStart >= 0)
+                {
+                    int qStart = json.IndexOf("\"", reasoningStart + 12) + 1;
+                    int qEnd = json.IndexOf("\"", qStart);
+                    if (qStart > 0 && qEnd > qStart)
+                        reasoning = json.Substring(qStart, qEnd - qStart);
+                }
+
+                // Parse survivor (optional — null means use config default)
+                string survivor = null;
+                int survivorStart = json.IndexOf("\"survivor\":");
+                if (survivorStart >= 0)
+                {
+                    int qStart = json.IndexOf("\"", survivorStart + 11) + 1;
+                    int qEnd = json.IndexOf("\"", qStart);
+                    if (qStart > 0 && qEnd > qStart)
+                        survivor = json.Substring(qStart, qEnd - qStart);
+                }
+
+                // Parse items array — simple extraction: find each {"name":"X","count":N} block
+                var items = new List<(string name, int count)>();
+                int searchFrom = 0;
+                while (true)
+                {
+                    int nameIdx = json.IndexOf("\"name\":", searchFrom);
+                    if (nameIdx < 0) break;
+
+                    int nqStart = json.IndexOf("\"", nameIdx + 7) + 1;
+                    int nqEnd = json.IndexOf("\"", nqStart);
+                    if (nqStart <= 0 || nqEnd <= nqStart) break;
+                    string itemName = json.Substring(nqStart, nqEnd - nqStart);
+
+                    int countIdx = json.IndexOf("\"count\":", nqEnd);
+                    int count = 1;
+                    if (countIdx >= 0)
+                    {
+                        int numStart = countIdx + 8;
+                        while (numStart < json.Length && (json[numStart] == ' ' || json[numStart] == ':'))
+                            numStart++;
+                        int numEnd = numStart;
+                        while (numEnd < json.Length && char.IsDigit(json[numEnd]))
+                            numEnd++;
+                        if (numEnd > numStart)
+                            int.TryParse(json.Substring(numStart, numEnd - numStart), out count);
+                    }
+
+                    if (!string.IsNullOrEmpty(itemName))
+                        items.Add((itemName, count));
+
+                    searchFrom = nqEnd + 1;
+                }
+
+                DebugLog($"[Counterboss] Parsed {items.Count} item types, reasoning length={reasoning.Length}");
+
+                // Route to the correct controller based on current scene.
+                // On moon2 (Commencement) the herald handles Phase 1; everywhere else the
+                // normal teleporter counterboss handles it.
+                string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                bool isMoon2 = sceneName == "moon2";
+
+                if (isMoon2 && RainflayerPlugin.EnableMithrixHerald.Value)
+                {
+                    var heraldController = RainflayerPlugin.Instance?.mithrixHeraldController;
+                    if (heraldController == null)
+                    {
+                        RainflayerPlugin.Instance?.LogError("[Counterboss] MithrixHeraldController not initialized");
+                        SendResponse("{\"type\": \"COUNTERBOSS_RESPONSE\", \"status\": \"error\", \"reason\": \"herald_controller_null\"}");
+                        return;
+                    }
+                    heraldController.CacheCounterbuild(items, reasoning, survivor);
+                }
+                else
+                {
+                    var counterbossController = RainflayerPlugin.Instance?.counterbossController;
+                    if (counterbossController == null)
+                    {
+                        RainflayerPlugin.Instance?.LogError("[Counterboss] CounterbossController not initialized");
+                        SendResponse("{\"type\": \"COUNTERBOSS_RESPONSE\", \"status\": \"error\", \"reason\": \"controller_null\"}");
+                        return;
+                    }
+                    counterbossController.CacheCounterbuild(items, reasoning, survivor);
+                }
+                SendResponse("{\"type\": \"COUNTERBOSS_RESPONSE\", \"status\": \"ok\"}");
+            }
+            catch (Exception e)
+            {
+                RainflayerPlugin.Instance?.LogError($"[Counterboss] HandleCounterbossSpawn error: {e.Message}");
+                SendResponse("{\"type\": \"COUNTERBOSS_RESPONSE\", \"status\": \"error\", \"reason\": \"" + EscapeJson(e.Message) + "\"}");
+            }
+        }
+
+        /// <summary>
+        /// Emit an item_picked_up event to Python with the player's full current inventory.
+        /// Call this whenever the player's inventory changes (Inventory.onInventoryChanged hook).
+        /// Safe to call from any thread — SendResponse is locked.
+        /// </summary>
+        public void SendItemPickedUpEvent(CharacterBody body)
+        {
+            if (body?.inventory == null) return;
+
+            try
+            {
+                // Build items JSON array
+                var itemParts = new List<string>();
+                int totalItems = 0;
+                if (body.inventory.itemAcquisitionOrder != null)
+                {
+                    foreach (var idx in body.inventory.itemAcquisitionOrder)
+                    {
+                        ItemDef def = ItemCatalog.GetItemDef(idx);
+                        int count = body.inventory.GetItemCountPermanent(idx);
+                        if (count <= 0) continue;
+                        totalItems += count;
+                        string name = def?.name ?? "Unknown";
+                        itemParts.Add("{\"name\": \"" + EscapeJson(name) + "\", \"count\": " + count + "}");
+                    }
+                }
+
+                // Include the player's survivor so the LLM can tailor the counter
+                string survivorName = "";
+                string survivorDisplay = "";
+                CharacterBody b = RainflayerPlugin.GetPlayerBody();
+                if (b != null)
+                {
+                    var survivorDef = SurvivorCatalog.FindSurvivorDefFromBody(b.gameObject);
+                    if (survivorDef != null)
+                    {
+                        survivorName = EscapeJson(survivorDef.cachedName);
+                        survivorDisplay = EscapeJson(Language.GetString(survivorDef.displayNameToken));
+                    }
+                    else
+                    {
+                        // Body might not be in SurvivorCatalog (e.g. modded) — fall back to display name
+                        survivorDisplay = EscapeJson(b.GetDisplayName());
+                    }
+                }
+
+                string json = "{\"type\": \"EVENT\", \"event_type\": \"item_picked_up\", ";
+                json += "\"total_items\": " + totalItems + ", ";
+                json += "\"player_survivor\": \"" + survivorName + "\", ";
+                json += "\"player_survivor_display\": \"" + survivorDisplay + "\", ";
+                json += "\"items\": [" + string.Join(",", itemParts) + "]}";
+                SendResponse(json);
+                DebugLog($"[Counterboss] Sent item_picked_up: {totalItems} total items");
+            }
+            catch (Exception e)
+            {
+                DebugLog($"[Counterboss] SendItemPickedUpEvent error: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Emit a counterboss_died event to Python after the adversary is defeated.
+        /// </summary>
+        public void SendCounterbossDiedEvent()
+        {
+            SendEvent("counterboss_died");
+            DebugLog("[Counterboss] Sent counterboss_died event");
+        }
+
+        /// <summary>
+        /// Emit a stage_started event to Python with the player's current inventory
+        /// (may be empty on stage 1). Python fires a pre-emptive LLM call so a
+        /// counterbuild is cached before the teleporter starts charging.
+        /// </summary>
+        public void SendStageStartedEvent(CharacterBody body)
+        {
+            if (body == null) return;
+            try
+            {
+                // Build player inventory snapshot (same format as item_picked_up)
+                var itemParts = new List<string>();
+                int totalItems = 0;
+                if (body.inventory != null)
+                {
+                    foreach (var idx in body.inventory.itemAcquisitionOrder)
+                    {
+                        int count = body.inventory.GetItemCountPermanent(idx);
+                        if (count <= 0) continue;
+                        ItemDef def = ItemCatalog.GetItemDef(idx);
+                        if (def == null) continue;
+                        string name = EscapeJson(def.name);
+                        itemParts.Add($"{{\"name\":\"{name}\",\"count\":{count}}}");
+                        totalItems += count;
+                    }
+                }
+
+                // Player survivor
+                string survivorName = "";
+                string survivorDisplay = "";
+                if (body.master != null)
+                {
+                    var survivors = SurvivorCatalog.orderedSurvivorDefs;
+                    foreach (var s in survivors)
+                    {
+                        if (s == null) continue;
+                        if (s.bodyPrefab == body.gameObject ||
+                            (body.gameObject.name.StartsWith(s.cachedName, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            survivorName = EscapeJson(s.cachedName);
+                            survivorDisplay = EscapeJson(Language.GetString(s.displayNameToken));
+                            break;
+                        }
+                    }
+                    // Fallback: derive from body name
+                    if (string.IsNullOrEmpty(survivorName))
+                    {
+                        survivorName = EscapeJson(body.name.Replace("Body(Clone)", "").Replace("Body", "").Trim());
+                        survivorDisplay = survivorName;
+                    }
+                }
+
+                string json = "{\"type\":\"EVENT\",\"event_type\":\"stage_started\","
+                            + "\"items\":[" + string.Join(",", itemParts) + "],"
+                            + "\"total_items\":" + totalItems + ","
+                            + "\"player_survivor\":\"" + survivorName + "\","
+                            + "\"player_survivor_display\":\"" + survivorDisplay + "\"}";
+                SendResponse(json);
+                RainflayerPlugin.Instance?.Log($"[Counterboss] Sent stage_started: {totalItems} items, survivor={survivorDisplay}");
+            }
+            catch (Exception e)
+            {
+                RainflayerPlugin.Instance?.LogError($"[Counterboss] SendStageStartedEvent error: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Emit a run_started event to Python with the full available item catalog
+        /// for this run, grouped by tier. Python uses this as the LLM's item pool
+        /// so it never picks items that don't exist in the current run.
+        ///
+        /// Format: {"type":"EVENT","event_type":"run_started",
+        ///          "items":[{"name":"Syringe","displayName":"Soldier's Syringe","tier":"tier1","desc":"Gain +15% attack speed."}, ...]}
+        /// </summary>
+        public void SendRunStartedEvent()
+        {
+            if (Run.instance == null) return;
+            try
+            {
+                var parts = new List<string>();
+
+                void AddList(List<PickupIndex> list)
+                {
+                    if (list == null) return;
+                    foreach (var pickup in list)
+                    {
+                        PickupDef pd = PickupCatalog.GetPickupDef(pickup);
+                        if (pd == null || pd.itemIndex == ItemIndex.None) continue;
+                        ItemDef def = ItemCatalog.GetItemDef(pd.itemIndex);
+                        if (def == null) continue;
+                        // Use the item's authoritative tier, not the drop-list label
+                        string tierLabel = def.tier switch
+                        {
+                            ItemTier.Tier1    => "tier1",
+                            ItemTier.Tier2    => "tier2",
+                            ItemTier.Tier3    => "tier3",
+                            ItemTier.Lunar    => "lunar",
+                            ItemTier.Boss     => "boss",
+                            ItemTier.VoidTier1 => "void1",
+                            ItemTier.VoidTier2 => "void2",
+                            ItemTier.VoidTier3 => "void3",
+                            _                 => "other",
+                        };
+                        string internalName = EscapeJson(def.name);
+                        string displayName = EscapeJson(
+                            !string.IsNullOrEmpty(def.nameToken)
+                                ? Language.GetString(def.nameToken)
+                                : def.name
+                        );
+                        string desc = EscapeJson(
+                            !string.IsNullOrEmpty(def.pickupToken)
+                                ? Language.GetString(def.pickupToken)
+                                : ""
+                        );
+                        parts.Add($"{{\"name\":\"{internalName}\",\"displayName\":\"{displayName}\",\"tier\":\"{tierLabel}\",\"desc\":\"{desc}\"}}");
+                    }
+                }
+
+                AddList(Run.instance.availableTier1DropList);
+                AddList(Run.instance.availableTier2DropList);
+                AddList(Run.instance.availableTier3DropList);
+                AddList(Run.instance.availableBossDropList);
+                AddList(Run.instance.availableLunarItemDropList);
+                AddList(Run.instance.availableVoidTier1DropList);
+                AddList(Run.instance.availableVoidTier2DropList);
+                AddList(Run.instance.availableVoidTier3DropList);
+
+                // Build survivor list — non-hidden survivors that have a spawnable master prefab
+                var survivorParts = new List<string>();
+                foreach (var survivorDef in SurvivorCatalog.orderedSurvivorDefs)
+                {
+                    if (survivorDef == null || survivorDef.hidden) continue;
+                    string cachedName = survivorDef.cachedName;
+                    if (string.IsNullOrEmpty(cachedName)) continue;
+                    // Verify a monster master exists for this survivor
+                    string masterName = cachedName + "MonsterMaster";
+                    if (MasterCatalog.FindMasterPrefab(masterName) == null)
+                        masterName = cachedName + "Master";
+                    if (MasterCatalog.FindMasterPrefab(masterName) == null) continue;
+                    string displayName = EscapeJson(Language.GetString(survivorDef.displayNameToken));
+                    survivorParts.Add($"{{\"name\":\"{EscapeJson(cachedName)}\",\"displayName\":\"{displayName}\"}}");
+                }
+
+                string enableAi = RainflayerPlugin.EnableAIControl.Value ? "true" : "false";
+                string json = "{\"type\":\"EVENT\",\"event_type\":\"run_started\",\"items\":["
+                              + string.Join(",", parts)
+                              + "],\"survivors\":["
+                              + string.Join(",", survivorParts)
+                              + "],\"enable_ai_control\":" + enableAi + "}";
+                SendResponse(json);
+                RainflayerPlugin.Instance?.Log($"[Counterboss] Sent run_started: {parts.Count} items, {survivorParts.Count} survivors, enable_ai_control={enableAi}");
+            }
+            catch (Exception e)
+            {
+                RainflayerPlugin.Instance?.LogError($"[Counterboss] SendRunStartedEvent error: {e.Message}");
             }
         }
     }

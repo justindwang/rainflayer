@@ -13,7 +13,7 @@ namespace Rainflayer
     /// Main BepInEx plugin for Rainflayer — RoR2 AI brain integration.
     /// Enables AI to control a player character via BaseAI and external commands.
     /// </summary>
-    [BepInPlugin("justindwang.rainflayer", "Rainflayer", "1.1.1")]
+    [BepInPlugin("justindwang.rainflayer", "Rainflayer", "2.0.0")]
     public class RainflayerPlugin : BaseUnityPlugin
     {
         // Static references for easy access
@@ -28,8 +28,17 @@ namespace Rainflayer
         public static ConfigEntry<bool> RecordWaypoints { get; private set; }
         public static ConfigEntry<bool> PillarSkip { get; private set; }
 
+        // Counterboss config
+        public static ConfigEntry<bool> EnableCounterboss { get; private set; }
+        public static ConfigEntry<bool> EnableMithrixHerald { get; private set; }
+        public static ConfigEntry<float> CounterbossHPMultiplier { get; private set; }
+        public static ConfigEntry<float> CounterbossDamageMultiplier { get; private set; }
+        public static ConfigEntry<float> CounterbossHealMultiplier { get; private set; }
+
         // Components
         public AIController aiController;  // Made public for SocketBridge access
+        public CounterbossController counterbossController;  // LLM counterboss feature
+        public MithrixHeraldController mithrixHeraldController;  // Mithrix Phase 1 herald replacement
         private EntityDetector entityDetector;
 
         // Flag to retry EntityDetector reference update when body becomes available.
@@ -39,6 +48,12 @@ namespace Rainflayer
         // Damage i-frames (prevent repeated contact/AOE damage)
         private static Dictionary<GameObject, float> recentDamageSources = new Dictionary<GameObject, float>();
         private const float DAMAGE_COOLDOWN = 0.5f; // 500ms i-frames per damage source
+
+        // Inventory change debounce — prevents burst of events (e.g. ShareSuite sharing multiple
+        // items at once) from spamming the Python LLM with rapid-fire requests.
+        private Inventory _subscribedInventory = null;
+        private float _inventoryChangedDebounceTimer = -1f;
+        private const float INVENTORY_DEBOUNCE_SECONDS = 0.5f;
 
 
         void Awake()
@@ -88,6 +103,43 @@ namespace Rainflayer
                 false,
                 "When true, instantly fully charge all moon battery pillars upon entering the moon2 (Commencement) stage. Use for debugging."
             );
+
+            // Counterboss
+            EnableCounterboss = Config.Bind(
+                "Counterboss",
+                "EnableCounterboss",
+                false,
+                "Enable LLM-controlled counterboss at teleporter events. Requires Python brain to be running."
+            );
+
+            EnableMithrixHerald = Config.Bind(
+                "Counterboss",
+                "EnableMithrixHerald",
+                true,
+                "When EnableCounterboss is true, replace Mithrix Phase 1 with a herald adversary survivor. " +
+                "Mithrix stands frozen (powering up) while you fight the herald. Phases 2-4 proceed normally."
+            );
+
+            CounterbossHPMultiplier = Config.Bind(
+                "Counterboss",
+                "CounterbossHPMultiplier",
+                1.0f,
+                "HP multiplier applied on top of the killed teleporter boss's max HP. 1.0 = same HP as the boss it replaced."
+            );
+
+            CounterbossDamageMultiplier = Config.Bind(
+                "Counterboss",
+                "CounterbossDamageMultiplier",
+                0.4f,
+                "Damage multiplier applied to the adversary's base damage. 1.0 = full damage, 0.4 = 40%."
+            );
+
+            CounterbossHealMultiplier = Config.Bind(
+                "Counterboss",
+                "CounterbossHealMultiplier",
+                0.25f,
+                "Multiplier applied to all incoming healing on the adversary. 1.0 = full healing, 0.25 = 25% (reduces self-heal from items like Voidling)."
+            );
         }
 
         void SetupHooks()
@@ -104,10 +156,13 @@ namespace Rainflayer
             // Hook damage to track what's damaging the player
             On.RoR2.HealthComponent.TakeDamage += HealthComponent_TakeDamage;
 
+            // Hook healing to cap adversary self-heal
+            On.RoR2.HealthComponent.Heal += HealthComponent_Heal;
+
             // Hook death to track player death AND reset state
             GlobalEventManager.onCharacterDeathGlobal += OnCharacterDeathGlobal;
 
-            Log("Hooks setup (AI control + camera override mode + damage tracking + run/stage/death resets)");
+            Log("Hooks setup (AI control + camera override mode + damage tracking + run/stage/death resets + counterboss)");
         }
 
         private void PlayerCharacterMasterController_Update(On.RoR2.PlayerCharacterMasterController.orig_Update orig, RoR2.PlayerCharacterMasterController self)
@@ -149,6 +204,11 @@ namespace Rainflayer
                 aiController.GetCombatController()?.Reset(); // Re-initialize camera for new scene's CameraRigController
                 Log("[Stage] New stage - reset drop pod state and camera");
             }
+
+            // Trigger pre-emptive counterboss LLM call so a build is cached before
+            // the teleporter fires. We delay a few frames so the player body is ready.
+            if (EnableCounterboss.Value)
+                StartCoroutine(SendStageStartedAfterDelay());
 
             // PillarSkip: instantly charge all moon batteries on moon2
             if (PillarSkip.Value)
@@ -233,6 +293,10 @@ namespace Rainflayer
             // Call original first
             orig(self);
 
+            // Send the live item catalog to Python for counterboss LLM context
+            if (EnableCounterboss.Value)
+                StartCoroutine(SendRunStartedAfterDelay());
+
             // Reset ALL AI state when starting a new run (avoids game restart!)
             Log("[Run] ========================================");
             Log("[Run] NEW RUN DETECTED - Resetting AI state");
@@ -250,6 +314,34 @@ namespace Rainflayer
             PlayerAI = null;
             entityDetectorNeedsRefresh = true;  // EntityDetector needs fresh refs once new body spawns
             Log("[Run] ✓ Player references cleared (will reinitialize, EntityDetector refresh queued)");
+        }
+
+        private System.Collections.IEnumerator SendRunStartedAfterDelay()
+        {
+            // Wait two frames — Run.Start populates drop lists asynchronously
+            yield return null;
+            yield return null;
+            var socketBridge = GetComponent<SocketBridge>();
+            socketBridge?.SendRunStartedEvent();
+        }
+
+        private System.Collections.IEnumerator SendStageStartedAfterDelay()
+        {
+            // Wait up to 5 seconds for a player body to be available (drop pod lands)
+            float elapsed = 0f;
+            while (elapsed < 5f)
+            {
+                CharacterBody body = GetPlayerBody();
+                if (body != null)
+                {
+                    var socketBridge = GetComponent<SocketBridge>();
+                    socketBridge?.SendStageStartedEvent(body);
+                    yield break;
+                }
+                yield return new WaitForSeconds(0.5f);
+                elapsed += 0.5f;
+            }
+            Log("[Counterboss] SendStageStartedAfterDelay: player body not available after 5s — skipping");
         }
 
         private void HealthComponent_TakeDamage(On.RoR2.HealthComponent.orig_TakeDamage orig, HealthComponent self, DamageInfo damageInfo)
@@ -308,6 +400,23 @@ namespace Rainflayer
 
             // Call original
             orig(self, damageInfo);
+        }
+
+        private float HealthComponent_Heal(On.RoR2.HealthComponent.orig_Heal orig, HealthComponent self, float amount, ProcChainMask procChainMask, bool nonRegen)
+        {
+            if (EnableCounterboss.Value && self.body != null)
+            {
+                CharacterMaster bodyMaster = self.body.master;
+                bool isAdversary = (counterbossController != null && bodyMaster == counterbossController.AdversaryMaster)
+                                || (mithrixHeraldController != null && bodyMaster == mithrixHeraldController.AdversaryMaster);
+                if (isAdversary)
+                {
+                    float mult = CounterbossHealMultiplier.Value;
+                    if (mult < 1f)
+                        amount *= mult;
+                }
+            }
+            return orig(self, amount, procChainMask, nonRegen);
         }
 
         private void OnCharacterDeathGlobal(DamageReport damageReport)
@@ -369,12 +478,54 @@ namespace Rainflayer
             // Add Socket Bridge component (handles all Python↔C# communication)
             gameObject.AddComponent<SocketBridge>();
 
-            Log("Components initialized: AI Controller + Socket Bridge");
+            // Add Counterboss Controller (LLM adversary feature)
+            counterbossController = gameObject.AddComponent<CounterbossController>();
+
+            // Add Mithrix Herald Controller (Phase 1 Mithrix replacement)
+            mithrixHeraldController = gameObject.AddComponent<MithrixHeraldController>();
+
+            // Pre-load EnemyInfoPanel prefab for AdversaryItemDisplay
+            AdversaryItemDisplay.LoadPrefab();
+
+            Log("Components initialized: AI Controller + Socket Bridge + Counterboss Controller + Mithrix Herald Controller");
+        }
+
+        void SubscribeToInventoryChanges(CharacterMaster master)
+        {
+            if (!EnableCounterboss.Value) return;
+
+            // Unsubscribe from previous inventory (in case of respawn/run restart)
+            if (_subscribedInventory != null)
+            {
+                _subscribedInventory.onInventoryChanged -= OnLocalPlayerInventoryChanged;
+                _subscribedInventory = null;
+            }
+
+            Inventory inv = master?.inventory;
+            if (inv == null) return;
+
+            _subscribedInventory = inv;
+            inv.onInventoryChanged += OnLocalPlayerInventoryChanged;
+            Log("[Counterboss] Subscribed to local player inventory changes");
+        }
+
+        private void OnLocalPlayerInventoryChanged()
+        {
+            // Guard: only care if counterboss is enabled and adversary hasn't spawned yet
+            if (!EnableCounterboss.Value) return;
+            if (counterbossController != null && counterbossController.SpawnedThisStage) return;
+            if (mithrixHeraldController != null && mithrixHeraldController.SpawnedThisStage) return;
+
+            // Arm the debounce timer — actual send happens in Update() after the burst settles
+            _inventoryChangedDebounceTimer = INVENTORY_DEBOUNCE_SECONDS;
         }
 
         void InitializePlayerAI(CharacterMaster master)
         {
             LocalPlayerMaster = master;
+
+            // Subscribe to inventory change events for counterboss LLM triggering
+            SubscribeToInventoryChanges(master);
 
             // Get existing AI component
             PlayerAI = master.GetComponent<BaseAI>();
@@ -617,6 +768,26 @@ namespace Rainflayer
                     // Re-detect character class now that we have the new body
                     // (class may differ between runs, affects sprint-while-shooting and other combat behavior)
                     aiController?.GetCombatController()?.DetectCharacterClass();
+
+                    // Retry inventory subscription if it wasn't available at InitializePlayerAI time
+                    if (_subscribedInventory == null && LocalPlayerMaster != null)
+                        SubscribeToInventoryChanges(LocalPlayerMaster);
+                }
+            }
+
+            // Inventory change debounce: fire item_picked_up event to Python once the burst settles
+            if (_inventoryChangedDebounceTimer > 0f)
+            {
+                _inventoryChangedDebounceTimer -= Time.deltaTime;
+                if (_inventoryChangedDebounceTimer <= 0f)
+                {
+                    _inventoryChangedDebounceTimer = -1f;
+                    CharacterBody body = GetPlayerBody();
+                    if (body != null)
+                    {
+                        var socketBridge = GetComponent<SocketBridge>();
+                        socketBridge?.SendItemPickedUpEvent(body);
+                    }
                 }
             }
 

@@ -1815,7 +1815,7 @@ namespace Rainflayer
         /// <summary>
         /// Find the nearest active JumpVolume on the current map.
         /// On moon2 (Commencement) this is the launch pad that sends the player
-        /// to the Mythrix arena after all four batteries are charged.
+        /// to the Mithrix arena after all four batteries are charged.
         /// Walking onto the trigger fires the launch — no button press needed.
         /// </summary>
         public GameObject FindMoonJumpPad()
@@ -1868,7 +1868,7 @@ namespace Rainflayer
         /// <summary>
         /// Find the nearest MoonElevator escape orb that is in Ready state (Interactability.Available).
         /// MoonElevators exist in the scene from stage load but start Inactive (ConditionsNotMet).
-        /// After Mythrix is defeated, TriggerOnArenaExit fires and transitions them to Ready (Available).
+        /// After Mithrix is defeated, TriggerOnArenaExit fires and transitions them to Ready (Available).
         /// Returns the nearest Ready elevator, or null if none are ready yet (boss still alive).
         /// </summary>
         public GameObject FindLunarTeleporterOrb()
@@ -1899,7 +1899,7 @@ namespace Rainflayer
 
                     string name = obj.name ?? "";
 
-                    // MoonElevator is the post-Mythrix escape orb (confirmed via EntityStates.MoonElevator source)
+                    // MoonElevator is the post-Mithrix escape orb (confirmed via EntityStates.MoonElevator source)
                     if (name.IndexOf("MoonElevator", System.StringComparison.OrdinalIgnoreCase) < 0)
                         continue;
 
@@ -1931,7 +1931,7 @@ namespace Rainflayer
             if (nearest != null)
                 Log($"Found ready MoonElevator '{nearest.name}' at {nearestDist:F1}m");
             else
-                Log($"FindLunarTeleporterOrb: no Ready MoonElevator found (Mythrix not defeated yet?)");
+                Log($"FindLunarTeleporterOrb: no Ready MoonElevator found (Mithrix not defeated yet?)");
 
             return nearest;
         }

@@ -7,18 +7,22 @@ Technical overview of how Rainflayer works.
 ## Overview
 
 ```
-┌─ Python Brain (Strategic, ~0.25 Hz) ──────────────────────┐
+┌─ Python Brain ────────────────────────────────────────────┐
 │                                                           │
-│  BrainController                                          │
+│  BrainController (0.25 Hz decision loop)                  │
 │    → query game state (5 queries per cycle)               │
 │    → drain C# event queue (action outcomes)               │
 │    → build context for LLM                                │
 │    → RoR2BrainModel (Llama 4 Maverick 17B, Novita.ai)     │
-│    → parse JSON commands                                  │
-│    → send commands to mod                                 │
+│    → parse JSON commands → send to mod                    │
+│                                                           │
+│  CounterbossWorker (event-driven, independent task)       │
+│    → receives item_picked_up / stage_started events       │
+│    → CounterbossModel → LLM counter-build                 │
+│    → sends COUNTERBOSS_SPAWN to C# cache immediately      │
 │                                                           │
 └──────────────── ↕ TCP 127.0.0.1:7777 ─────────────────────┘
-┌─ BepInEx Mod (Tactical, 50 Hz) ───────────────────────────┐
+┌─ BepInEx Mod (50 Hz) ─────────────────────────────────────┐
 │                                                           │
 │  RainflayerPlugin  (lifecycle, hooks)                     │
 │    ├── SocketBridge  (TCP server comms, main-thread queue)│
@@ -26,7 +30,9 @@ Technical overview of how Rainflayer works.
 │    │     ├── CombatController   (aiming, skills, camera)  │
 │    │     ├── NavigationController  (pathfinding, interact)│
 │    │     └── EntityDetector  (enemies, interactables)     │
-│    └── PlayerAI  (BaseAI wrapper)                         │
+│    ├── PlayerAI  (BaseAI wrapper)                         │
+│    ├── CounterbossController  (adversary spawn + cache)   │
+│    └── MithrixHeraldController  (Commencement phase 1)    │
 │                                                           │
 └──────────────────── Risk of Rain 2 ───────────────────────┘
 ```
@@ -171,6 +177,50 @@ directive> play more aggressively
 directive> clear
 ```
 The directive is included in the LLM context for ~45s (tactical) or ~10min (strategic).
+
+---
+
+## Counterboss Architecture
+
+The counterboss system runs independently of the main brain decision loop.
+
+### Python side
+
+`CounterbossWorker` is an asyncio task created by the orchestrator alongside `BrainController`. It has its own event queue populated by `SocketBridge` whenever a `item_picked_up` or `stage_started` event arrives from C#.
+
+On each item pickup, it cancels any in-flight LLM task and starts a new one via `CounterbossModel.generate_counterbuild()`. When the LLM finishes, the result is sent immediately to C# as a `COUNTERBOSS_SPAWN` message — the build is cached in `CounterbossController` before the teleporter ever fires.
+
+`CounterbossModel` builds the LLM prompt from:
+- A random subselection of items from the live drop catalog (received from C# on `run_started`)
+- A random subselection of survivors, culled by a rolling ban-list of the last 4 used
+- The player's current inventory with rarity counts
+
+The LLM is constrained to return a JSON object with `survivor`, `items` (internal names only, from the catalog), and `reasoning`. Item counts are scaled post-parse to exactly match the player's total.
+
+### C# side
+
+`CounterbossController` hooks three events:
+- `Stage.Start` — resets spawn state for the new stage
+- `TeleporterInteraction.onTeleporterBeginChargingGlobal` — triggers `SpawnWithCachedOrRandom()`
+- `BossGroup.DropRewards` — suppresses the normal boss item drop since the adversary replaced it
+
+`SpawnWithCachedOrRandom()` uses the cached build from Python if available, otherwise generates a random build from `Run.instance.availableTier1/2/3DropList`. The adversary is spawned via `MasterCatalog` with a custom `TeamIndex` (Monster), its inventory is populated, and `AdversaryAI.Inject()` wires up per-survivor `AISkillDriver` patterns adapted from [RoR2-PlayerBots](https://github.com/Rampage45/RoR2-PlayerBots).
+
+`MithrixHeraldController` handles Commencement specifically: it hooks `GlobalEventManager.onCharacterDeathGlobal` to detect the phase 1 → phase 2 transition and replaces the Mithrix arena spawn with the adversary survivor.
+
+### COUNTERBOSS_SPAWN message
+
+```json
+{
+  "type": "COUNTERBOSS_SPAWN",
+  "survivor": "Huntress",
+  "items": [{"name": "Bear", "count": 3}, {"name": "CritGlasses", "count": 2}],
+  "reasoning": "Crit storm incoming — Huntress behind layered armor walls.",
+  "source": "llm"
+}
+```
+
+`source` is `"llm"` or `"random"` (fallback). `survivor` may be `null` if the LLM pick was invalid; C# falls back to the config default in that case.
 
 ---
 

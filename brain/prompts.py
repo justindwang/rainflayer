@@ -39,8 +39,8 @@ NAVIGATION & INTERACTION (combined for simplicity):
 - "FIND_AND_INTERACT:shrine" - Go to nearest shrine and use it
 - "FIND_AND_INTERACT:teleporter" - Go to teleporter and activate it
 - "FIND_AND_INTERACT:pillar" - Go to nearest uncharged moon battery pillar and interact (use only when directed by user)
-- "FIND_AND_INTERACT:jump_pad" - Navigate to the jump pad leading to the Mythrix arena (use only when directed by user, after all pillars charged)
-- "FIND_AND_INTERACT:ship" - Escape the moon and reach the rescue ship after defeating Mythrix (use only when directed by user)
+- "FIND_AND_INTERACT:jump_pad" - Navigate to the jump pad leading to the Mithrix arena (use only when directed by user, after all pillars charged)
+- "FIND_AND_INTERACT:ship" - Escape the moon and reach the rescue ship after defeating Mithrix (use only when directed by user)
 - "GOTO:CANCEL" - Cancel current navigation AND clear all island/return-path tracking (full reset)
 
 MOON2 ISLAND STATE RESETTING — ONLY for moon2 bugged state resets, use ONLY when user directs on moon2:
@@ -49,9 +49,6 @@ Moon2 Islands: blood, soul, mass, design
 - "GOTO:<from>-main"      → return from <from> island back to main platform (e.g., GOTO:mass-main)
 - "GOTO:<from>-<dest>"    → return from <from> island, then travel to <dest> island (e.g., GOTO:mass-blood)
 - "GOTO:<dest>"           → travel from main platform to <dest> island (no return needed) (e.g. GOTO:mass)
-
-QUERIES:
-- "QUERY_PILLARS" - Check charge status of all moon battery pillars (use only when directed by user)
 
 OTHER:
 - "BUY_SHOP_ITEM:item_name" - Buy from shop (e.g., "Soldier's Syringe")
@@ -88,7 +85,7 @@ STRATEGIC PRIORITIES (in order):
 
    MOON2 / COMMENCEMENT STAGE:
    - There are NO chests, shrines, or teleporter — do not issue FIND_AND_INTERACT:chest/teleporter
-   - General Objectives: charge 4 pillars → use jump pad → fight Mythrix → escape to ship - HOWEVER ONLY issue commands when directed by user - do mode roam otherwise
+   - General Objectives: charge 4 pillars → use jump pad → fight Mithrix → escape to ship - HOWEVER ONLY issue commands when directed by user - do mode roam otherwise
    - When directed to charge pillars, issue FIND_AND_INTERACT:pillar - if jump pad, issue FIND_AND_INTERACT:jump_pad - if escape/ship, issue FIND_AND_INTERACT:ship
    - While a pillar is actively charging (after FIND_AND_INTERACT:pillar succeeds/interacted): use "MODE:defend_zone" to stay inside and charge it
    - Default mode while waiting: "MODE:combat", "STRATEGY:aggressive"
@@ -129,8 +126,8 @@ When you see "interrupted", "failed (stuck)", or "failed (no gold)" in action hi
 2. FOR CHESTS - no gold: You need more money! Either find cheaper chests or farm enemies first
 3. FOR STUCK NAVIGATION (chests/shrines only): Try "GOTO:CANCEL" then pick a different objective
 4. FOR PILLARS/JUMP_PAD/SHIP - never cancel, never retry unless user says to — wait for success
-5. FOR PILLARS/JUMP_PAD - if failed with reason "in_mythrix_arena": you are already in the Mythrix arena — do NOT retry pillar or jump_pad commands, switch to MODE:combat
-6. FOR SHIP - if failed with reason "mythrix_not_defeated": still in the Mythrix arena — defeat Mythrix first, then retry FIND_AND_INTERACT:ship
+5. FOR PILLARS/JUMP_PAD - if failed with reason "in_mithrix_arena": you are already in the Mithrix arena — do NOT retry pillar or jump_pad commands, switch to MODE:combat
+6. FOR SHIP - if failed with reason "mithrix_not_defeated": still in the Mithrix arena — defeat Mithrix first, then retry FIND_AND_INTERACT:ship
 7. FOR MODE:defend_zone - failed (no_active_zone): no chargeable zone is active yet, switch to MODE:combat and wait
 8. Don't retry chests more than 2-3 times - if still failing, move on to other objectives
 9. If a chest keeps saying "no gold", skip it and find a cheaper one!

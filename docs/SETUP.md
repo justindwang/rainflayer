@@ -42,6 +42,24 @@ Create `.env` in the repo root:
 NOVITA_API_KEY=your_key_here
 ```
 
+This is enough to run both the LLM player and the Counterboss feature using the default model (Llama 4 Maverick 17B via Novita.ai).
+
+### Using a different model
+
+You can swap the LLM for either feature independently using env vars:
+
+```
+# Override the player brain model
+BRAIN_MODEL=openai/gpt-4o-mini
+BRAIN_API_KEY=sk-...
+
+# Override the counterboss model (optional — falls back to BRAIN_* if unset)
+COUNTERBOSS_MODEL=anthropic/claude-haiku-4-5-20251001
+COUNTERBOSS_API_KEY=<anthropic key>
+```
+
+Models are specified in [LiteLLM format](https://docs.litellm.ai/docs/providers): `provider/model-name`. Any provider LiteLLM supports works here. If `COUNTERBOSS_MODEL` is not set, counterboss uses the same model as the brain.
+
 ---
 
 ## Step 3: Run
@@ -77,6 +95,21 @@ DebugMode = false
 
 - `EnableAIControl` — set to `false` to play manually without removing the mod
 - `DebugMode` — enables verbose logging in `BepInEx/LogOutput.log`
+
+```ini
+[Counterboss]
+EnableCounterboss = true
+CounterbossHPMultiplier = 1.0
+CounterbossDamageMultiplier = 0.4
+CounterbossHealMultiplier = 0.25
+```
+
+- `EnableCounterboss` — set to `false` to disable the adversary entirely
+- `CounterbossHPMultiplier` — scales the adversary's HP relative to the teleporter boss it replaced
+- `CounterbossDamageMultiplier` — scales the adversary's damage output (default 0.4 keeps it fair without the brain playing it optimally)
+- `CounterbossHealMultiplier` — scales incoming healing on the adversary (default 0.25 reduces the strength of self-healing item builds)
+
+See [COUNTERBOSS.md](COUNTERBOSS.md) for more detail on how the feature works.
 
 ---
 

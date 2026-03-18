@@ -46,7 +46,7 @@ namespace Rainflayer
         private const float NAV_MOVE_SMOOTH = 0.15f;  // Move direction lerp factor per fixed frame
         private const float NAV_AIM_SMOOTH = 0.07f;   // Aim/camera lerp factor (slower = smoother camera)
 
-        // Set to true after the mod teleports the player out of the Mythrix arena to the blood
+        // Set to true after the mod teleports the player out of the Mithrix arena to the blood
         // room landing spot. Switches FIND_AND_INTERACT:ship from Phase 1 (arena escape teleport)
         // to Phase 2 (navigate Moon2ShipChain to the rescue ship).
         public bool WasArenaTeleported = false;
@@ -362,7 +362,7 @@ namespace Rainflayer
             },
         };
 
-        // Waypoint chain for the Mythrix jump pad (shares first hops with mass, then diverges).
+        // Waypoint chain for the Mithrix jump pad (shares first hops with mass, then diverges).
         public static readonly Vector3[] Moon2JumpPadChain = new Vector3[]
         {
             new Vector3(  64f, -191f,   8f),  // [1] same as mass [1]

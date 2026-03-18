@@ -27,6 +27,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from .socket_bridge import start_socket_bridge, stop_socket_bridge, get_socket_bridge
+from .llm_backend import LLMBackend
 from .model import RoR2BrainModel
 from .orchestrator import RoR2Orchestrator
 
@@ -150,20 +151,22 @@ def main():
     print()
     print("=" * 60)
     print("  rainflayer — RoR2 LLM Brain Server")
-    print("  Llama 4 Maverick 17B via Novita.ai")
     print("=" * 60)
 
     setup_readline()
     logging.getLogger().setLevel(logging.INFO)
 
     print(cyan("  Initialising brain model..."))
-    brain_model = RoR2BrainModel(api_key=api_key)
+    brain_backend = LLMBackend.from_env("BRAIN", novita_key=api_key)
+    brain_model = RoR2BrainModel(backend=brain_backend)
+    print(dim(f"  Brain: {brain_backend.model}"))
 
     print(cyan("  Creating orchestrator (socket bridge on port 7777)..."))
     try:
         orchestrator = RoR2Orchestrator(
             brain_model=brain_model,
             brain_update_interval=args.interval,
+            api_key=api_key,
         )
     except RuntimeError as e:
         print(red(f"  ERROR: {e}"))

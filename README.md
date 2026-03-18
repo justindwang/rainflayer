@@ -10,14 +10,31 @@
 
 <p align="center">
   <a href="docs/SETUP.md">Setup</a> |
+  <a href="docs/COUNTERBOSS.md">Counterboss</a> |
   <a href="docs/PROTOCOL.md">Protocol Reference</a> |
   <a href="docs/ARCHITECTURE.md">Architecture</a> |
   <a href="https://youtu.be/KtQ8kid-6og">Youtube Showcase</a>
 </p>
 
-Rainflayer connects a large language model to Risk of Rain 2. A BepInEx mod exposes game state (enemies, inventory, objectives, interactables) over a local TCP socket. A Python brain queries that state every few seconds, feeds it to an LLM, and sends back strategic commands that the mod executes at 50 Hz — movement, aiming, skills, camera, all without simulating mouse or keyboard input.
+Rainflayer connects large language models to Risk of Rain 2 — as a player character, as a strategic opponent, or both at once.
 
 Inspired by [Mindcraft](https://github.com/kolbytn/mindcraft) and [Mineflayer](https://github.com/PrismarineJS/mineflayer).
+
+---
+
+## Features
+
+### LLM Player Character
+The AI takes full control of a survivor, navigating the map, fighting enemies, collecting items, and working through objectives — all driven by an LLM reading live game state. Works solo or as a co-op partner. You can type natural-language goals in the terminal while it plays to steer its decisions.
+
+### Counterboss
+During your run, the LLM analyzes your build and designs a counter-loadout — choosing a survivor and items specifically picked to beat your win condition. That adversary replaces the teleporter boss each stage (and phase 1 of Mithrix on the moon) and fights you with its LLM-generated build. The adversary's items are visible in a UI panel similar to the Void Fields cell display, and the LLM's reasoning for the counter-build appears in chat.
+
+Each feature has its own enable flag. You can run just Counterboss while playing yourself, use both together (LLM player vs. LLM adversary), or play co-op with a friend while the adversary fights you both.
+
+Works even without the Python brain running: the adversary gets a random build from the stage drop pool if no brain is connected.
+
+See [docs/COUNTERBOSS.md](docs/COUNTERBOSS.md) for more detail.
 
 ---
 
@@ -66,16 +83,11 @@ All LLM inference runs remotely via the Novita.ai API, the Python brain is a lig
 
 ## How It Works
 
-```
-┌─ Python Brain (Strategic, ~0.25 Hz) ────────────────┐
-│  Llama 4 Maverick 17B via Novita.ai                 │
-│  Reads game state → LLM → commands                  │
-└────────────────────── ↕ TCP :7777 ──────────────────┘
-┌─ BepInEx Mod (Tactical, 50 Hz) ─────────────────────┐
-│  Intercepts InputBank + CameraRigController         │
-│  Entity detection, pathfinding, skill execution     │
-└──────────────────── Risk of Rain 2 ─────────────────┘
-```
+A BepInEx mod exposes live game state to a Python brain over a local connection. The brain feeds that state to an LLM, which sends back decisions that the mod executes in real time.
+
+**LLM Player Character** — the brain runs a decision loop every few seconds, reading your character's current situation and issuing movement, combat, and interaction commands.
+
+**Counterboss** — a separate worker watches your inventory throughout the run and calls the LLM whenever your build changes. By the time you activate the teleporter, the adversary's counter-build is already ready.
 
 While the brain plays, you can type natural-language goals to influence its decisions in real time:
 
@@ -86,7 +98,9 @@ directive> clear
 directive> status
 ```
 
-This is just the minimum usage case - connecting to your own custom LLMs / AI projects is intended as the broader use case.
+Connecting your own LLMs or AI projects is the intended broader use case — the default setup (Llama 4 Maverick via Novita.ai) is just a starting point.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a technical deep dive.
 
 ---
 
@@ -247,6 +261,7 @@ This list is not exhaustive — there are likely bugs that haven't been discover
 - **Survivor coverage:** Not all survivors have been thoroughly tested. Behavior quality varies by character
 - **Too much speed:** Navigation gets bugged if character has more than 2 goat hoofs of speed
 - **defend_zone wacky movement:** The defend_zone navigation override may make the character movement and navigation choppy/scuffed - working on smoothing out the leashing behavior
+- **mountain shrine untested:** I dont think counterboss currently works with mountain shrines
 
 ---
 
@@ -254,14 +269,7 @@ This list is not exhaustive — there are likely bugs that haven't been discover
 
 ### Near-term
 - Fixing all bugs listed above
-
-### LLM-controlled enemies (planned)
-
-The same socket interface used to control the player character can be extended to control enemies. A `Soul` model issuing directives to `teamIndex: Monster` instead of the player would give the LLM agency over an enemy character — navigating, targeting the player, and using skills via the same command layer.
-
-A more interesting variant: put the AI on an **opposing survivor** — same character type as the player but on the enemy team. RoR2 supports custom `TeamIndex` assignments (see [PVP Mod](https://thunderstore.io/package/brynzananas/PVP_Mod/) and [Refightilization](https://thunderstore.io/package/Wonda/Refightilization/) for prior art on team reassignment). This would create an AI-controlled adversary that fights and moves like a player, opening the door to AI vs. human PvP scenarios within a co-op game.
-- Idea 1 - Both are survivors on different teams, still PVE'ing and collecting items (chest items automatically get added to inventory to prevent stealing) - and killing each other allows the killer to steal a chosen/random item from the deceased, and the deceased respawns after a cooldown, while dying PVE still generates an automatic loss
-- Idea 2 - with 80% # of your items, where it chooses its build to counter yours (and with balanced HP) - all the way up to replacing Mythrix (and on mythrix it can potentially choose to disable/steal what it thinks are your best items)
+- Counterboss polish: smoother adversary AI, better build balancing, more survivor coverage
 
 ### Longer-term
 - The original zero-shot computer use approach (no mods, no game-specific code, just screenshots + mouse/keyboard) remains the broader goal, applicable to any game
@@ -279,27 +287,11 @@ A more interesting variant: put the AI on an **opposing survivor** — same char
 
 ---
 
-## Architecture
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a technical deep dive:
-- How InputBank and CameraRigController are hooked
-- Multi-height raycasting for line-of-sight checks
-- Thread-safe Unity ↔ socket communication
-- Why direct API control was chosen over input simulation
-
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the full socket protocol reference.
-
----
-
 ## How to Reach Me
 
 - **GitHub Issues:** [github.com/justindwang/rainflayer/issues](https://github.com/justindwang/rainflayer/issues) — bug reports and feature requests
-- **Email:** emailkiri3851@gmail.com
-- **Reddit:** https://www.reddit.com/user/Riolutail/
 - **Discord:** riolutail
 
 ---
 
-## License
-
-MIT
+## MIT License

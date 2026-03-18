@@ -45,6 +45,13 @@ class Bridge:
     # Queries
     # ------------------------------------------------------------------
 
+    def query_config(self) -> Optional[dict]:
+        """Returns current C# config values: enable_ai_control, enable_counterboss."""
+        response = self.socket.send_query("QUERY_CONFIG")
+        if response and "error" not in response:
+            return response
+        return None
+
     def query_inventory(self) -> Optional[InventoryData]:
         response = self.socket.send_query("QUERY_INVENTORY")
         if response and "error" not in response:

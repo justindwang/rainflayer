@@ -1,7 +1,9 @@
-"""Brain Model - Strategic planning via Llama 4 Maverick 17B (Novita.ai).
+"""Brain Model - Strategic planning via LLM (default: Llama 4 Maverick 17B on Novita.ai).
 
 Takes a text game state summary from the mod and outputs JSON commands.
 No screenshots needed — the mod provides all entity data.
+
+Provider is configured via LLMBackend — see llm_backend.py for switching instructions.
 """
 from __future__ import annotations
 
@@ -12,8 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-import httpx
-
+from .llm_backend import LLMBackend
 from .prompts import generate_ror2_brain_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -42,30 +43,29 @@ class RoR2BrainOutput:
 
 class RoR2BrainModel:
     """
-    Strategic planning for RoR2 via Llama 4 Maverick 17B (Novita.ai).
+    Strategic planning for RoR2 via configurable LLM backend.
 
-    Get an API key at https://novita.ai and set NOVITA_API_KEY in your .env.
-    Cost: roughly $0.10–0.50/hour depending on decision frequency.
+    Default: Llama 4 Maverick 17B on Novita.ai.
+    Switch provider via BRAIN_MODEL / BRAIN_API_KEY env vars (see llm_backend.py).
     """
 
-    def __init__(
-        self,
-        api_key: str,
-        model: str = "meta-llama/llama-4-maverick-17b-128e-instruct-fp8",
-    ):
-        self.api_key = api_key
-        self.model = model
+    def __init__(self, backend: LLMBackend):
+        self.backend = backend
         self.system_prompt = generate_ror2_brain_system_prompt()
-        # 60s timeout — Llama 4 Maverick can spike under load
-        self.client = httpx.AsyncClient(timeout=60.0)
-        logger.info("[BrainModel] Initialized with Llama 4 Maverick 17B")
+        logger.info(f"[BrainModel] Initialized with backend model={backend.model}")
 
     async def generate_commands(self, brain_input: RoR2BrainInput) -> RoR2BrainOutput:
         try:
             start_time = time.time()
             user_content = self._build_user_message(brain_input)
-            response_dict = await self._call_novita_api(self.system_prompt, user_content)
+            response_text = await self.backend.complete(
+                system=self.system_prompt,
+                user=user_content,
+                max_tokens=1024,
+                temperature=0.3,
+            )
             latency_ms = (time.time() - start_time) * 1000
+            response_dict = self._parse_json_output(response_text)
 
             brain_output = RoR2BrainOutput(
                 timestamp_ms=int(time.time() * 1000),
@@ -97,27 +97,6 @@ class RoR2BrainModel:
             parts.append(f"\nUser directive: {brain_input.user_directive}")
         return "\n".join(parts)
 
-    async def _call_novita_api(self, system_prompt: str, user_content: str) -> Dict[str, Any]:
-        url = "https://api.novita.ai/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "max_tokens": 1024,
-            "temperature": 0.3,
-        }
-        response = await self.client.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        result = response.json()
-        response_text = result["choices"][0]["message"]["content"]
-        return self._parse_json_output(response_text)
-
     def _parse_json_output(self, response_text: str) -> Dict[str, Any]:
         try:
             parsed = json.loads(response_text)
@@ -134,6 +113,3 @@ class RoR2BrainModel:
         parsed.setdefault("commands", ["STRATEGY:balanced", "MODE:roam"])
         parsed.setdefault("reasoning", "No reasoning provided")
         return parsed
-
-    async def close(self):
-        await self.client.aclose()
